@@ -1,9 +1,15 @@
+use std::env;
+use std::ffi::OsString;
+use std::fs;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use agent_client_protocol as acp;
 use async_tungstenite::tungstenite::{
@@ -19,7 +25,7 @@ use ct_bridge::{serve, AgentTransport, AgentTransportError, BridgeConfig, Bridge
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 const ALLOWED_ORIGIN: &str = "http://localhost:5173";
 const BLOCKED_ORIGIN: &str = "http://malicious.local";
@@ -102,6 +108,223 @@ async fn bridge_handshake_accepts_initialize() {
     assert!(forwarded.client_capabilities.terminal);
 
     harness.shutdown().await;
+}
+
+// --- auth/cli_login tests ---
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_cli_login_launches_claude_cli_from_path() {
+    let temp = TestTempDir::new("auth-cli-login-success");
+    let bin_dir = temp.bin_path();
+    let sentinel_path = temp.path().join("login-invoked");
+    let cwd_path = temp.path().join("login-cwd.txt");
+    let args_path = temp.path().join("login-args.txt");
+
+    let script_body = format!(
+        "#!/bin/sh\nPWD=`pwd`\necho \"$PWD\" > \"{cwd}\"\necho \"$@\" > \"{args}\"\ntouch \"{sentinel}\"\nsleep 1\n",
+        cwd = cwd_path.display(),
+        args = args_path.display(),
+        sentinel = sentinel_path.display()
+    );
+
+    temp.write_bin_executable("claude", &script_body);
+    let _path_guard = EnvVarGuard::prepend_path(&bin_dir);
+
+    let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "auth-cli-login-success",
+            "method": "auth/cli_login",
+            "params": Value::Null
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("auth-cli-login-success")));
+    let result = payload
+        .get("result")
+        .expect("auth/cli_login should return a result payload when CLI launches");
+    assert_eq!(result.get("status"), Some(&json!("started")));
+
+    wait_for_path(&sentinel_path).await;
+
+    let recorded_cwd = fs::read_to_string(&cwd_path)
+        .expect("stub should record working directory");
+    let expected_cwd = env::current_dir().expect("current dir available");
+    assert_eq!(
+        Path::new(recorded_cwd.trim()),
+        expected_cwd.as_path(),
+        "login CLI should run inside project root"
+    );
+
+    let recorded_args = fs::read_to_string(&args_path)
+        .expect("stub should record arguments");
+    assert_eq!(
+        recorded_args.trim(),
+        "/login",
+        "login CLI should be invoked with /login argument"
+    );
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_cli_login_errors_when_cli_unavailable() {
+    let temp = TestTempDir::new("auth-cli-login-missing-cli");
+    let bin_dir = temp.bin_path();
+    // Intentionally do not write a claude binary; PATH will only contain empty dir.
+    let _path_guard = EnvVarGuard::prepend_path(&bin_dir);
+
+    let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "auth-cli-login-missing",
+            "method": "auth/cli_login",
+            "params": Value::Null
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("auth-cli-login-missing")));
+    let error = payload
+        .get("error")
+        .expect("auth/cli_login should return error when CLI cannot be resolved");
+
+    let error_code = error
+        .get("code")
+        .and_then(|code| code.as_i64())
+        .expect("error response should include numeric code");
+    assert_eq!(error_code, -32000, "expected internal error code for missing CLI");
+
+    let message = error
+        .get("message")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    assert!(
+        message.contains("claude") || message.contains("login"),
+        "error message should mention missing Claude CLI"
+    );
+
+    harness.shutdown().await;
+}
+
+struct EnvVarGuard {
+    key: String,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn prepend_path(dir: &Path) -> Self {
+        let previous = env::var_os("PATH");
+        let mut paths: Vec<PathBuf> = previous
+            .as_ref()
+            .map(|value| env::split_paths(value).collect())
+            .unwrap_or_default();
+        paths.insert(0, dir.to_path_buf());
+        let new_value = env::join_paths(paths).expect("failed to join PATH");
+        let guard = Self {
+            key: "PATH".to_string(),
+            previous,
+        };
+        env::set_var("PATH", &new_value);
+        guard
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.previous.take() {
+            env::set_var(&self.key, prev);
+        } else {
+            env::remove_var(&self.key);
+        }
+    }
+}
+
+struct TestTempDir {
+    path: PathBuf,
+    bin: PathBuf,
+}
+
+impl TestTempDir {
+    fn new(prefix: &str) -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("{prefix}-{unique}"));
+        let bin = path.join("bin");
+        fs::create_dir_all(&bin).expect("failed to create temp bin dir");
+        Self { path, bin }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn bin_path(&self) -> PathBuf {
+        self.bin.clone()
+    }
+
+    fn write_bin_executable(&self, name: &str, contents: &str) -> PathBuf {
+        let script_path = self.bin.join(name);
+        fs::write(&script_path, contents).expect("failed to write stub script");
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&script_path)
+                .expect("stub metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).expect("set stub permissions");
+        }
+        script_path
+    }
+}
+
+impl Drop for TestTempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+async fn wait_for_path(path: &Path) {
+    for _ in 0..50 {
+        if path.exists() {
+            return;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for path {path:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

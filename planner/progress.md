@@ -145,3 +145,35 @@
 • next:
     - extend login flow to surface progress updates and capture stderr for UI (RAT-LWS-REQ-094)
     - wire multi-agent launcher registry with cached credentials
+
+§ UPDATE 009 — 2025-09-18 11:05
+
+• status: tests-failing
+
+• notes:
+
+    - auth/cli_login integration tests added with CLAUDE_ACP_BIN stub; see planner/notes/009_test.md
+
+    - bridge currently returns method_not_found/-32601 so tests remain red until launcher implemented
+
+• js: not-run
+
+• rust: fail (`cargo test auth_cli_login`)
+
+• evidence: planner/notes/009_test.md, tests/bridge_handshake.rs
+
+§ UPDATE 009 — 2025-09-18 11:30
+
+• status: tests-failing
+
+• notes:
+
+    - auth/cli_login tests now use PATH-resolved claude shim and missing-cli scenario; see planner/notes/009_test.md
+
+    - bridge still returns -32601 (method not found) because auth/cli_login handler not implemented yet
+
+• js: not-run
+
+• rust: fail (`cargo test auth_cli_login`)
+
+• evidence: planner/notes/009_test.md, tests/bridge_handshake.rs
