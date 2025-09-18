@@ -4,3 +4,12 @@
 [submodule "external_refrence/claude-code-acp"]
 	path = external_refrence/claude-code-acp
 	url = https://github.com/zed-industries/claude-code-acp.git
+[submodule "external_refrence/opencode"]
+	path = external_refrence/opencode
+	url = https://github.com/sst/opencode.git
+[submodule "external_refrence/sst"]
+	path = external_refrence/sst
+	url = https://github.com/sst/sst.git
+[submodule "external_refrence/zed"]
+	path = external_refrence/zed
+	url = https://github.com/zed-industries/zed.git
