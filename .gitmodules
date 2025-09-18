@@ -1,0 +1,6 @@
+[submodule "external_refrence/agent-client-protocol"]
+	path = external_refrence/agent-client-protocol
+	url = https://github.com/zed-industries/agent-client-protocol.git
+[submodule "external_refrence/claude-code-acp"]
+	path = external_refrence/claude-code-acp
+	url = https://github.com/zed-industries/claude-code-acp.git
