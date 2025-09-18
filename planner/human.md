@@ -1,0 +1,1 @@
+You can also look at the docs in planner/docs/* for information on how ZED implimented their ACP client for their desktop editor, I think it would be a good idea to imitate their implimentation a bit (as long as we are still adhearing to the spec)
