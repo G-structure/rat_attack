@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -212,6 +213,84 @@ async fn bridge_handshake_rejects_other_methods_before_initialize() {
     harness.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_forwards_session_new_after_initialize() {
+    let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // First, send initialize
+    let initialize_request = acp::InitializeRequest {
+        protocol_version: acp::VERSION,
+        client_capabilities: acp::ClientCapabilities {
+            fs: acp::FileSystemCapability {
+                read_text_file: true,
+                write_text_file: true,
+                meta: None,
+            },
+            terminal: true,
+            meta: None,
+        },
+        meta: None,
+    };
+
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "init-1",
+            "method": "initialize",
+            "params": initialize_request,
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+    assert_eq!(payload.get("id"), Some(&json!("init-1")));
+    assert!(payload.get("result").is_some(), "initialize should succeed");
+
+    // Now, send session/new
+    let new_session_request = acp::NewSessionRequest {
+        cwd: PathBuf::from("/tmp"),
+        mcp_servers: vec![],
+        meta: None,
+    };
+
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "session-1",
+            "method": "session/new",
+            "params": new_session_request,
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("session-1")));
+    let result = payload
+        .get("result")
+        .unwrap_or_else(|| panic!("expected result, got {payload:?}"));
+    assert_eq!(
+        result.get("sessionId"),
+        Some(&json!("test-session-id")),
+        "should relay agent's sessionId"
+    );
+
+    let calls = agent.take_new_session_calls().await;
+    assert_eq!(calls.len(), 1, "session/new should be forwarded to agent");
+
+    harness.shutdown().await;
+}
+
 fn success_initialize_response() -> acp::InitializeResponse {
     acp::InitializeResponse {
         protocol_version: acp::VERSION,
@@ -224,6 +303,8 @@ fn success_initialize_response() -> acp::InitializeResponse {
 struct FakeAgentState {
     initialize_calls: Vec<acp::InitializeRequest>,
     initialize_response: acp::InitializeResponse,
+    new_session_calls: Vec<acp::NewSessionRequest>,
+    new_session_response: acp::NewSessionResponse,
 }
 
 #[derive(Clone)]
@@ -232,11 +313,17 @@ struct FakeAgentTransport {
 }
 
 impl FakeAgentTransport {
-    fn new(response: acp::InitializeResponse) -> Self {
+    fn new(initialize_response: acp::InitializeResponse) -> Self {
         Self {
             state: Arc::new(Mutex::new(FakeAgentState {
                 initialize_calls: Vec::new(),
-                initialize_response: response,
+                initialize_response,
+                new_session_calls: Vec::new(),
+                new_session_response: acp::NewSessionResponse {
+                    session_id: acp::SessionId("test-session-id".into()),
+                    modes: None,
+                    meta: None,
+                },
             })),
         }
     }
@@ -244,6 +331,11 @@ impl FakeAgentTransport {
     async fn take_initialize_calls(&self) -> Vec<acp::InitializeRequest> {
         let mut state = self.state.lock().await;
         std::mem::take(&mut state.initialize_calls)
+    }
+
+    async fn take_new_session_calls(&self) -> Vec<acp::NewSessionRequest> {
+        let mut state = self.state.lock().await;
+        std::mem::take(&mut state.new_session_calls)
     }
 }
 
@@ -258,6 +350,19 @@ impl AgentTransport for FakeAgentTransport {
             let mut guard = state.lock().await;
             guard.initialize_calls.push(request);
             Ok(guard.initialize_response.clone())
+        })
+    }
+
+    fn new_session(
+        &self,
+        request: acp::NewSessionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<acp::NewSessionResponse, AgentTransportError>> + Send>>
+    {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut guard = state.lock().await;
+            guard.new_session_calls.push(request);
+            Ok(guard.new_session_response.clone())
         })
     }
 }

@@ -106,6 +106,10 @@ pub trait AgentTransport: Send + Sync + 'static {
         &self,
         request: acp::InitializeRequest,
     ) -> Pin<Box<dyn Future<Output = Result<acp::InitializeResponse, AgentTransportError>> + Send>>;
+    fn new_session(
+        &self,
+        request: acp::NewSessionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<acp::NewSessionResponse, AgentTransportError>> + Send>>;
 }
 
 pub fn serve(
@@ -360,6 +364,40 @@ async fn process_request(
                         .map_err(|err| tungstenite::Error::Io(std::io::Error::other(err)))?;
                     send_result(stream, id, result).await?;
                     *initialized = true;
+                }
+                Err(err) => {
+                    let error = err.into_rpc_error();
+                    send_error(stream, id, error).await?;
+                }
+            }
+        }
+        "session/new" => {
+            if !*initialized {
+                let error = acp::Error::method_not_found();
+                send_error(stream, id, error).await?;
+                return Ok(());
+            }
+
+            let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
+            let request: acp::NewSessionRequest = match serde_json::from_value(params) {
+                Ok(request) => request,
+                Err(err) => {
+                    send_error(
+                        stream,
+                        id,
+                        acp::Error::invalid_params().with_data(err.to_string()),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+
+            let response = transport.new_session(request).await;
+            match response {
+                Ok(response) => {
+                    let result = serde_json::to_value(response)
+                        .map_err(|err| tungstenite::Error::Io(std::io::Error::other(err)))?;
+                    send_result(stream, id, result).await?;
                 }
                 Err(err) => {
                     let error = err.into_rpc_error();

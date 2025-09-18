@@ -43,3 +43,20 @@
 • next:
     - implement fs capability handling after handshake
     - add structured logging for bridge admission errors
+
+## PLAN 004 — session/new forwarding
+[test session](https://opencode.ai/s/rxVbj7fn)
+[code session](https://opencode.ai/s/XpDVpMQq)
+
+[x] 004 — session/new forwarding
+• acceptance: Forward `session/new` to the agent only after initialize and relay the result unchanged.
+• prompts: [prompts/004_test.md](./prompts/004_test.md), [prompts/004_code.md](./prompts/004_code.md)
+• status: applied
+• notes:
+    - context: src/lib.rs, tests/bridge_handshake.rs (new coverage for session/new)
+    - js: not-run
+    - rust: pass (`cargo test`)
+    - follow-ups: capture agent-side notifications and permission prompts later
+• next:
+    - handle agent notifications streaming to CT-WEB
+    - add permission policy scaffolding per RAT-LWS-REQ-092
