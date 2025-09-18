@@ -93,17 +93,18 @@
     - rust: cargo test --test ws_upgrade (8/8 tests pass)
     - follow-ups: extend initialize payload to advertise bridge capabilities per spec (RAT-LWS-REQ-020)
 
-§ PLAN 005 — Initialize fs capabilities enforcement
+## PLAN 005 — Initialize fs capabilities enforcement
 [test session](https://opencode.ai/s/StHgV5f5)
+[code session](https://opencode.ai/s/0jzTvCXx)
 
-[ ] 005 — Initialize fs capabilities enforcement
+[x] 005 — Initialize fs capabilities enforcement
 • acceptance: Bridge initialize echoes fs capabilities and rejects missing ones (RAT-LWS-REQ-020)
 • prompts: [prompts/005_test.md](./prompts/005_test.md), [prompts/005_code.md](./prompts/005_code.md)
-• status: planned
+• status: applied
 • notes:
     - context: src/main.rs; tests/ws_upgrade.rs
-    - js: not run yet
-    - rust: not run yet
+    - js: N/A (no frontend tests configured)
+    - rust: cargo test --test ws_upgrade (14/14 tests pass)
     - follow-ups: consider terminal capability advertisement (RAT-LWS-REQ-060)
 • next: explore RAT-LWS-REQ-021 agent capability negotiation
 • next: prep auth preflight coverage for RAT-LWS-REQ-022
