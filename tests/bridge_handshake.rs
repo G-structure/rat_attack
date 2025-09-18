@@ -291,6 +291,183 @@ async fn bridge_forwards_session_new_after_initialize() {
     harness.shutdown().await;
 }
 
+// Tests for session/prompt streaming notifications (RAT-LWS-REQ-031)
+// These tests will fail until streaming functionality is implemented
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_streams_session_prompt_updates() {
+    let agent = Arc::new(FakeStreamingAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize first
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+
+    // Create a session first
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Send session/prompt request - this should trigger streaming
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "prompt-1",
+            "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": "Hello, please help me with something"
+            }
+        }),
+    )
+    .await;
+
+    // Expect to receive multiple session/update notifications
+    let mut update_count = 0;
+    let mut final_response_received = false;
+
+    // Collect streaming updates until we get the final response
+    for _ in 0..10 {  // max 10 messages to avoid infinite loop
+        let message = next_message(&mut ws).await;
+        let payload = parse_json(&message);
+
+        if payload.get("method").and_then(|m| m.as_str()) == Some("session/update") {
+            // Verify session/update notification format per RAT-LWS-REQ-011
+            assert!(payload.get("params").is_some(), "session/update must have params");
+            update_count += 1;
+        } else if payload.get("id") == Some(&json!("prompt-1")) {
+            // This should be the final response
+            let result = payload.get("result").expect("final response should have result");
+            assert!(
+                result.get("stopReason").is_some(),
+                "final response must contain stopReason per spec"
+            );
+            final_response_received = true;
+            break;
+        }
+    }
+
+    assert!(update_count > 0, "should receive at least one session/update notification");
+    assert!(final_response_received, "should receive final response with stopReason");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_forwards_session_prompt_transparently() {
+    let agent = Arc::new(FakeStreamingAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let _session_response = next_message(&mut ws).await;
+
+    let test_prompt = "Test prompt for transparency";
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "prompt-transparency",
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "test-session-id",
+                "prompt": test_prompt
+            }
+        }),
+    )
+    .await;
+
+    // Wait for any response (the test will fail because method doesn't exist yet)
+    let _response = next_message(&mut ws).await;
+
+    // Verify the agent received the request transparently (RAT-LWS-REQ-011)
+    let prompt_calls = agent.take_prompt_calls().await;
+    assert_eq!(prompt_calls.len(), 1, "session/prompt should be forwarded to agent");
+    assert_eq!(prompt_calls[0].prompt, test_prompt);
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_session_update_preserves_json_rpc_format() {
+    let agent = Arc::new(FakeStreamingAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and setup session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let _session_response = next_message(&mut ws).await;
+
+    // Configure agent to send specific notifications
+    agent.configure_streaming_updates(vec![
+        json!({
+            "sessionId": "test-session-id",
+            "chunk": {"type": "text", "content": "Hello"},
+            "index": 0
+        }),
+        json!({
+            "sessionId": "test-session-id",
+            "chunk": {"type": "text", "content": " world"},
+            "index": 1
+        })
+    ]).await;
+
+    // Send prompt request
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "streaming-test",
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "test-session-id",
+                "prompt": "Say hello"
+            }
+        }),
+    )
+    .await;
+
+    // Verify session/update notifications preserve JSON-RPC format
+    for expected_index in 0..2 {
+        let message = next_message(&mut ws).await;
+        let payload = parse_json(&message);
+
+        // RAT-LWS-REQ-011: JSON-RPC notification format preserved
+        assert_eq!(payload.get("jsonrpc"), Some(&json!("2.0")));
+        assert_eq!(payload.get("method"), Some(&json!("session/update")));
+        assert!(payload.get("params").is_some());
+        assert!(payload.get("id").is_none()); // notifications don't have id
+
+        let params = payload.get("params").unwrap();
+        assert_eq!(params.get("index"), Some(&json!(expected_index)));
+    }
+
+    harness.shutdown().await;
+}
+
 fn success_initialize_response() -> acp::InitializeResponse {
     acp::InitializeResponse {
         protocol_version: acp::VERSION,
@@ -305,6 +482,22 @@ struct FakeAgentState {
     initialize_response: acp::InitializeResponse,
     new_session_calls: Vec<acp::NewSessionRequest>,
     new_session_response: acp::NewSessionResponse,
+}
+
+// Represents a session/prompt request that needs to be implemented
+#[derive(Clone, Debug)]
+struct PromptRequest {
+    session_id: String,
+    prompt: String,
+}
+
+struct FakeStreamingAgentState {
+    initialize_calls: Vec<acp::InitializeRequest>,
+    initialize_response: acp::InitializeResponse,
+    new_session_calls: Vec<acp::NewSessionRequest>,
+    new_session_response: acp::NewSessionResponse,
+    prompt_calls: Vec<PromptRequest>,
+    streaming_updates: Vec<Value>,
 }
 
 #[derive(Clone)]
@@ -365,16 +558,174 @@ impl AgentTransport for FakeAgentTransport {
             Ok(guard.new_session_response.clone())
         })
     }
+
+    fn prompt(
+        &self,
+        _request: acp::PromptRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>>
+    {
+        Box::pin(async move {
+            Err(AgentTransportError::NotImplemented)
+        })
+    }
+}
+
+#[derive(Clone)]
+struct FakeStreamingAgentTransport {
+    state: Arc<Mutex<FakeStreamingAgentState>>,
+}
+
+impl FakeStreamingAgentTransport {
+    fn new(initialize_response: acp::InitializeResponse) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(FakeStreamingAgentState {
+                initialize_calls: Vec::new(),
+                initialize_response,
+                new_session_calls: Vec::new(),
+                new_session_response: acp::NewSessionResponse {
+                    session_id: acp::SessionId("test-session-id".into()),
+                    modes: None,
+                    meta: None,
+                },
+                prompt_calls: Vec::new(),
+                streaming_updates: Vec::new(),
+            })),
+        }
+    }
+
+    async fn take_initialize_calls(&self) -> Vec<acp::InitializeRequest> {
+        let mut state = self.state.lock().await;
+        std::mem::take(&mut state.initialize_calls)
+    }
+
+    async fn take_new_session_calls(&self) -> Vec<acp::NewSessionRequest> {
+        let mut state = self.state.lock().await;
+        std::mem::take(&mut state.new_session_calls)
+    }
+
+    async fn take_prompt_calls(&self) -> Vec<PromptRequest> {
+        let mut state = self.state.lock().await;
+        std::mem::take(&mut state.prompt_calls)
+    }
+
+    async fn configure_streaming_updates(&self, updates: Vec<Value>) {
+        let mut state = self.state.lock().await;
+        state.streaming_updates = updates;
+    }
+}
+
+impl AgentTransport for FakeStreamingAgentTransport {
+    fn initialize(
+        &self,
+        request: acp::InitializeRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<acp::InitializeResponse, AgentTransportError>> + Send>>
+    {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut guard = state.lock().await;
+            guard.initialize_calls.push(request);
+            Ok(guard.initialize_response.clone())
+        })
+    }
+
+    fn new_session(
+        &self,
+        request: acp::NewSessionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<acp::NewSessionResponse, AgentTransportError>> + Send>>
+    {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut guard = state.lock().await;
+            guard.new_session_calls.push(request);
+            Ok(guard.new_session_response.clone())
+        })
+    }
+
+    fn prompt(
+        &self,
+        request: acp::PromptRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>>
+    {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut guard = state.lock().await;
+            // Extract prompt text - for simplicity, assume first content block is text
+            let prompt_text = if let Some(acp::ContentBlock::Text(text_content)) = request.prompt.first() {
+                text_content.text.clone()
+            } else {
+                "unknown prompt".to_string()
+            };
+
+            guard.prompt_calls.push(PromptRequest {
+                session_id: request.session_id.0.to_string(),
+                prompt: prompt_text,
+            });
+
+            // Return a simple response with stopReason for now
+            use agent_client_protocol as acp;
+            Ok(acp::PromptResponse {
+                stop_reason: acp::StopReason::EndTurn,
+                meta: None,
+            })
+        })
+    }
+}
+
+// Helper functions for the new streaming tests
+async fn send_initialize_request(ws: &mut WsStream) {
+    let initialize_request = acp::InitializeRequest {
+        protocol_version: acp::VERSION,
+        client_capabilities: acp::ClientCapabilities {
+            fs: acp::FileSystemCapability {
+                read_text_file: true,
+                write_text_file: true,
+                meta: None,
+            },
+            terminal: true,
+            meta: None,
+        },
+        meta: None,
+    };
+
+    send_json_rpc(
+        ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "init-req",
+            "method": "initialize",
+            "params": initialize_request,
+        }),
+    )
+    .await;
+}
+
+async fn send_session_new_request(ws: &mut WsStream) {
+    let new_session_request = acp::NewSessionRequest {
+        cwd: PathBuf::from("/tmp"),
+        mcp_servers: vec![],
+        meta: None,
+    };
+
+    send_json_rpc(
+        ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "session-new",
+            "method": "session/new",
+            "params": new_session_request,
+        }),
+    )
+    .await;
 }
 
 struct BridgeHarness {
     handle: BridgeHandle,
     addr: SocketAddr,
-    _agent: Arc<FakeAgentTransport>,
+    _agent: Arc<dyn AgentTransport>,
 }
 
 impl BridgeHarness {
-    async fn start(agent: Arc<FakeAgentTransport>) -> Self {
+    async fn start(agent: Arc<dyn AgentTransport>) -> Self {
         let config = BridgeConfig {
             bind_addr: "127.0.0.1:0".parse().expect("loopback address"),
             allowed_origins: vec![ALLOWED_ORIGIN.into()],
