@@ -103,3 +103,17 @@
 • next:
     - implement fs/write_text_file with permission gating per RAT-LWS-REQ-041
     - add permission policy scaffolding per RAT-LWS-REQ-092
+
+§ PLAN 007 — fs/write_text_file with permission gating
+[ ] 007 — fs/write_text_file with permission gating
+• acceptance: Bridge implements `fs/write_text_file` method that requires permission approval via `session/request_permission` with PR sandboxing and support for all permission outcomes
+• prompts: [prompts/007_test.md](./prompts/007_test.md), [prompts/007_code.md](./prompts/007_code.md)
+• status: planned
+• notes:
+    - context: src/lib.rs for fs/write_text_file method, tests/bridge_handshake.rs for permission gating tests
+    - js: not-run
+    - rust: all pass (14 tests passing before this step)
+    - follow-ups: permission policy registry implementation, terminal capabilities
+• next:
+    - implement terminal capability handling per RAT-LWS-REQ-060/062/063
+    - add permission policy scaffolding per RAT-LWS-REQ-092

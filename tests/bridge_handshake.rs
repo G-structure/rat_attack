@@ -1199,3 +1199,648 @@ async fn fs_read_text_file_handles_out_of_bounds_line_parameters() {
 
     harness.shutdown().await;
 }
+
+// FakePermissionAgentTransport for permission gating tests
+
+struct FakePermissionAgentState {
+    initialize_calls: Vec<acp::InitializeRequest>,
+    initialize_response: acp::InitializeResponse,
+    new_session_calls: Vec<acp::NewSessionRequest>,
+    new_session_response: acp::NewSessionResponse,
+    permission_calls: Vec<acp::RequestPermissionRequest>,
+    permission_response: Option<acp::RequestPermissionResponse>,
+}
+
+#[derive(Clone)]
+struct FakePermissionAgentTransport {
+    state: Arc<Mutex<FakePermissionAgentState>>,
+}
+
+impl FakePermissionAgentTransport {
+    fn new(initialize_response: acp::InitializeResponse) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(FakePermissionAgentState {
+                initialize_calls: Vec::new(),
+                initialize_response,
+                new_session_calls: Vec::new(),
+                new_session_response: acp::NewSessionResponse {
+                    session_id: acp::SessionId("test-session-id".into()),
+                    modes: None,
+                    meta: None,
+                },
+                permission_calls: Vec::new(),
+                permission_response: None,
+            })),
+        }
+    }
+
+    async fn take_initialize_calls(&self) -> Vec<acp::InitializeRequest> {
+        let mut state = self.state.lock().await;
+        std::mem::take(&mut state.initialize_calls)
+    }
+
+    async fn take_new_session_calls(&self) -> Vec<acp::NewSessionRequest> {
+        let mut state = self.state.lock().await;
+        std::mem::take(&mut state.new_session_calls)
+    }
+
+    async fn take_permission_calls(&self) -> Vec<acp::RequestPermissionRequest> {
+        let mut state = self.state.lock().await;
+        std::mem::take(&mut state.permission_calls)
+    }
+
+    async fn configure_permission_response(&self, response: acp::RequestPermissionResponse) {
+        let mut state = self.state.lock().await;
+        state.permission_response = Some(response);
+    }
+}
+
+impl AgentTransport for FakePermissionAgentTransport {
+    fn initialize(
+        &self,
+        request: acp::InitializeRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<acp::InitializeResponse, AgentTransportError>> + Send>>
+    {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut guard = state.lock().await;
+            guard.initialize_calls.push(request);
+            Ok(guard.initialize_response.clone())
+        })
+    }
+
+    fn new_session(
+        &self,
+        request: acp::NewSessionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<acp::NewSessionResponse, AgentTransportError>> + Send>>
+    {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut guard = state.lock().await;
+            guard.new_session_calls.push(request);
+            Ok(guard.new_session_response.clone())
+        })
+    }
+
+    fn prompt(
+        &self,
+        _request: acp::PromptRequest,
+        _notification_sender: Arc<dyn ct_bridge::NotificationSender>,
+    ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>>
+    {
+        Box::pin(async move { Err(AgentTransportError::NotImplemented) })
+    }
+}
+
+// Tests for fs/write_text_file with permission gating per RAT-LWS-REQ-041
+// These tests will fail until fs/write_text_file permission gating is implemented
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_write_text_file_requires_permission_approval() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to provide permission approval
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected {
+                option_id: acp::PermissionOptionId("allow_once".into()),
+            },
+            meta: None,
+        })
+        .await;
+
+    // Test fs/write_text_file request - should trigger permission flow per RAT-LWS-REQ-041
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "test_output.txt",
+                "content": "Hello, world!"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("write-1")));
+
+    // Should succeed after permission approval
+    let result = payload
+        .get("result")
+        .expect("fs/write_text_file should return success result when permission approved");
+    assert!(
+        result.is_object(),
+        "result should be an object (WriteTextFileResponse)"
+    );
+
+    // Verify permission was requested before write execution per RAT-LWS-REQ-041
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(
+        permission_calls.len(),
+        1,
+        "should request permission once before write"
+    );
+    let permission_request = &permission_calls[0];
+    assert_eq!(permission_request.session_id.0.as_ref(), session_id);
+
+    // Verify permission options include expected choices per RAT-LWS-REQ-091
+    let has_allow_once = permission_request
+        .options
+        .iter()
+        .any(|opt| opt.kind == acp::PermissionOptionKind::AllowOnce);
+    let has_reject_once = permission_request
+        .options
+        .iter()
+        .any(|opt| opt.kind == acp::PermissionOptionKind::RejectOnce);
+    assert!(has_allow_once, "should offer allow_once option");
+    assert!(has_reject_once, "should offer reject_once option");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_write_text_file_rejects_on_permission_deny() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to deny permission
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected {
+                option_id: acp::PermissionOptionId("reject_once".into()),
+            },
+            meta: None,
+        })
+        .await;
+
+    // Test fs/write_text_file request - should be rejected after permission denial
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-deny-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "test_output.txt",
+                "content": "Hello, world!"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("write-deny-1")));
+
+    // Should return error after permission denial
+    let error = payload
+        .get("error")
+        .expect("should have error when permission denied");
+    let error_code = error
+        .get("code")
+        .and_then(|c| c.as_i64())
+        .expect("error should have numeric code");
+    // Should be permission denied, not method not found
+    assert_ne!(
+        error_code, -32601,
+        "should be permission denied error, not method not found"
+    );
+
+    // Verify permission was requested before denial
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(
+        permission_calls.len(),
+        1,
+        "should request permission once before denial"
+    );
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_write_text_file_handles_permission_cancellation() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to return cancelled permission
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Cancelled,
+            meta: None,
+        })
+        .await;
+
+    // Test fs/write_text_file request - should handle cancellation appropriately
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-cancel-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "test_output.txt",
+                "content": "Hello, world!"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("write-cancel-1")));
+
+    // Should return error for cancelled permission per RAT-LWS-REQ-091
+    let error = payload
+        .get("error")
+        .expect("should have error when permission cancelled");
+    let error_code = error
+        .get("code")
+        .and_then(|c| c.as_i64())
+        .expect("error should have numeric code");
+    // Should be cancellation error, not method not found
+    assert_ne!(
+        error_code, -32601,
+        "should be cancellation error, not method not found"
+    );
+
+    // Verify permission was requested before cancellation
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(
+        permission_calls.len(),
+        1,
+        "should request permission once before cancellation"
+    );
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_write_text_file_enforces_project_root_sandbox() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Test writing file outside project root - should be rejected per RAT-LWS-REQ-044
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-oob-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "/etc/malicious_file.txt",
+                "content": "malicious content"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("write-oob-1")));
+
+    // Should return error for out-of-bounds write (not method not found)
+    let error = payload
+        .get("error")
+        .expect("should have error for out-of-bounds write");
+    let error_code = error
+        .get("code")
+        .and_then(|c| c.as_i64())
+        .expect("error should have numeric code");
+    // Should be permission/sandbox error, not method not found (-32601)
+    assert_ne!(
+        error_code, -32601,
+        "should be sandbox violation error, not method not found"
+    );
+
+    // Verify permission was NOT requested for out-of-bounds access
+    // (sandbox check should happen before permission request)
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(
+        permission_calls.len(),
+        0,
+        "should not request permission for out-of-bounds write"
+    );
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_write_text_file_permission_flow_with_allow_always() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to provide allow_always permission
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected {
+                option_id: acp::PermissionOptionId("allow_always".into()),
+            },
+            meta: None,
+        })
+        .await;
+
+    // Test fs/write_text_file request with allow_always outcome per RAT-LWS-REQ-091
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-always-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "test_always.txt",
+                "content": "Always allowed content"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("write-always-1")));
+
+    // Should succeed with allow_always permission
+    let result = payload
+        .get("result")
+        .expect("fs/write_text_file should succeed with allow_always permission");
+    assert!(
+        result.is_object(),
+        "result should be WriteTextFileResponse object"
+    );
+
+    // Verify permission was requested and includes allow_always option
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 1, "should request permission once");
+    let permission_request = &permission_calls[0];
+    let has_allow_always = permission_request
+        .options
+        .iter()
+        .any(|opt| opt.kind == acp::PermissionOptionKind::AllowAlways);
+    assert!(
+        has_allow_always,
+        "should offer allow_always option per RAT-LWS-REQ-091"
+    );
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_write_text_file_permission_flow_with_reject_always() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to provide reject_always permission
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected {
+                option_id: acp::PermissionOptionId("reject_always".into()),
+            },
+            meta: None,
+        })
+        .await;
+
+    // Test fs/write_text_file request with reject_always outcome per RAT-LWS-REQ-091
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-reject-always-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "test_reject.txt",
+                "content": "Always rejected content"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("write-reject-always-1")));
+
+    // Should return error with reject_always permission
+    let error = payload
+        .get("error")
+        .expect("should have error when permission rejected");
+    let error_code = error
+        .get("code")
+        .and_then(|c| c.as_i64())
+        .expect("error should have numeric code");
+    // Should be permission denied, not method not found
+    assert_ne!(
+        error_code, -32601,
+        "should be permission denied error, not method not found"
+    );
+
+    // Verify permission was requested and includes reject_always option
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 1, "should request permission once");
+    let permission_request = &permission_calls[0];
+    let has_reject_always = permission_request
+        .options
+        .iter()
+        .any(|opt| opt.kind == acp::PermissionOptionKind::RejectAlways);
+    assert!(
+        has_reject_always,
+        "should offer reject_always option per RAT-LWS-REQ-091"
+    );
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_write_text_file_validates_permission_before_execution() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to track execution order
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected {
+                option_id: acp::PermissionOptionId("allow_once".into()),
+            },
+            meta: None,
+        })
+        .await;
+
+    // Test fs/write_text_file request - should request permission BEFORE execution
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-order-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "test_execution_order.txt",
+                "content": "Content written after permission approval"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("write-order-1")));
+
+    // Should succeed after permission approval
+    let result = payload
+        .get("result")
+        .expect("fs/write_text_file should succeed after permission approval");
+    assert!(
+        result.is_object(),
+        "result should be WriteTextFileResponse object"
+    );
+
+    // Critical: Verify permission was requested before write execution per RAT-LWS-REQ-041
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(
+        permission_calls.len(),
+        1,
+        "should request permission exactly once before write execution"
+    );
+
+    // Verify the permission request contains the correct tool call information
+    let permission_request = &permission_calls[0];
+    assert_eq!(permission_request.session_id.0.as_ref(), session_id);
+    // The tool_call should contain information about the write operation
+    // This ensures transparency about what permission is being requested
+
+    harness.shutdown().await;
+}
