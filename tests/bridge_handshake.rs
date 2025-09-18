@@ -865,7 +865,7 @@ async fn fs_read_text_file_basic_functionality() {
             "id": "read-1",
             "method": "fs/read_text_file",
             "params": {
-                "path": "/project/test.txt"
+                "path": "tests/fs_test_file.md"
             }
         }),
     )
@@ -876,10 +876,12 @@ async fn fs_read_text_file_basic_functionality() {
 
     assert_eq!(payload.get("id"), Some(&json!("read-1")));
 
-    // This test should fail until fs/read_text_file is implemented
+    // Verify we get the expected file content
     let result = payload.get("result").expect("fs/read_text_file should return success result when implemented");
     assert!(result.get("content").is_some(), "result should contain file content");
-    assert!(result.get("content").unwrap().is_string(), "content should be a string");
+    let content = result.get("content").unwrap().as_str().expect("content should be a string");
+    assert!(content.contains("In the hush of dawn, love whispers soft as dew"), "should contain first line of poem");
+    assert!(content.contains("And in its gentle hold, true peace is found."), "should contain last line of poem");
 
     harness.shutdown().await;
 }
@@ -906,7 +908,7 @@ async fn fs_read_text_file_with_line_offset_and_limit() {
             "id": "read-offset-1",
             "method": "fs/read_text_file",
             "params": {
-                "path": "/project/test.txt",
+                "path": "tests/fs_test_file.md",
                 "line_offset": 5,
                 "line_limit": 10
             }
@@ -919,10 +921,15 @@ async fn fs_read_text_file_with_line_offset_and_limit() {
 
     assert_eq!(payload.get("id"), Some(&json!("read-offset-1")));
 
-    // This test should fail until fs/read_text_file is implemented
+    // Verify we get the limited file content
     let result = payload.get("result").expect("fs/read_text_file should return success result when implemented");
     assert!(result.get("content").is_some(), "result should contain limited file content");
-    // Should also verify that only the requested lines are returned
+    let content = result.get("content").unwrap().as_str().expect("content should be a string");
+
+    // Verify that only the requested lines are returned (lines 5-14, 10 lines total)
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 10, "should return exactly 10 lines");
+    assert!(content.contains("Love is the fire that warms the coldest night"), "should contain line 6 (offset from line 5)");
 
     harness.shutdown().await;
 }
@@ -991,7 +998,7 @@ async fn fs_read_text_file_rejects_missing_files() {
             "id": "read-missing-1",
             "method": "fs/read_text_file",
             "params": {
-                "path": "/project/nonexistent.txt"
+                "path": "tests/nonexistent_file.txt"
             }
         }),
     )
@@ -1033,7 +1040,7 @@ async fn fs_read_text_file_rejects_binary_files() {
             "id": "read-binary-1",
             "method": "fs/read_text_file",
             "params": {
-                "path": "/project/binary.bin"
+                "path": "tests/binary_test_file.bin"
             }
         }),
     )
@@ -1075,7 +1082,7 @@ async fn fs_read_text_file_handles_out_of_bounds_line_parameters() {
             "id": "read-oob-lines-1",
             "method": "fs/read_text_file",
             "params": {
-                "path": "/project/test.txt",
+                "path": "tests/fs_test_file.md",
                 "line_offset": 1000000,
                 "line_limit": 10
             }
