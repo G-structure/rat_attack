@@ -1,14 +1,17 @@
-use futures::SinkExt;
+use futures::{SinkExt, StreamExt};
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio_tungstenite::accept_hdr_async;
 use tungstenite::handshake::server::{Request, Response};
 use tungstenite::http;
 use tungstenite::{protocol::frame::CloseFrame, Message};
+use uuid::Uuid;
 
 struct Config {
     bind_addr: String,
     allowed_origins: Vec<String>,
+    bridge_id: String,
 }
 
 impl Default for Config {
@@ -16,6 +19,56 @@ impl Default for Config {
         Self {
             bind_addr: "127.0.0.1:8137".to_string(),
             allowed_origins: vec!["http://localhost:5173".to_string()],
+            bridge_id: Uuid::new_v4().to_string(),
+        }
+    }
+}
+
+fn handle_jsonrpc_request(request: &Value, bridge_id: &str) -> Option<Value> {
+    let method = request.get("method")?.as_str()?;
+    let id = request.get("id")?;
+
+    match method {
+        "initialize" => {
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "_meta": {
+                        "bridgeId": bridge_id
+                    }
+                }
+            });
+            Some(response)
+        }
+        _ => None, // Unknown method, no response
+    }
+}
+
+async fn handle_connection(
+    mut ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    bridge_id: String,
+) {
+    while let Some(msg) = ws_stream.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                if let Ok(request) = serde_json::from_str::<Value>(&text) {
+                    if let Some(response) = handle_jsonrpc_request(&request, &bridge_id) {
+                        if let Err(e) = ws_stream.send(Message::Text(response.to_string())).await {
+                            eprintln!("Failed to send response: {e:?}");
+                            break;
+                        }
+                    }
+                } else {
+                    eprintln!("Failed to parse JSON-RPC request: {text}");
+                }
+            }
+            Ok(Message::Close(_)) => break,
+            Ok(_) => {} // Ignore other message types
+            Err(e) => {
+                eprintln!("WebSocket error: {e:?}");
+                break;
+            }
         }
     }
 }
@@ -23,10 +76,12 @@ impl Default for Config {
 async fn run_server(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
     println!("Listening on: {}", config.bind_addr);
+    let bridge_id = config.bridge_id.clone();
 
     loop {
         let (stream, _) = listener.accept().await?;
         let allowed_origins = config.allowed_origins.clone();
+        let bridge_id = bridge_id.clone();
         tokio::spawn(async move {
             let valid_subproto = Arc::new(Mutex::new(false));
             let callback_valid = Arc::clone(&valid_subproto);
@@ -63,16 +118,16 @@ async fn run_server(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             match accept_hdr_async(stream, callback).await {
-                Ok(mut ws_stream) => {
+                Ok(ws_stream) => {
                     if !*valid_subproto.lock().unwrap() {
                         let close_frame = CloseFrame {
                             code: tungstenite::protocol::frame::coding::CloseCode::Policy,
                             reason: "Invalid or missing subprotocol".into(),
                         };
+                        let mut ws_stream = ws_stream;
                         let _ = ws_stream.send(Message::Close(Some(close_frame))).await;
                     } else {
-                        // For now, just drop
-                        drop(ws_stream);
+                        handle_connection(ws_stream, bridge_id).await;
                     }
                 }
                 Err(e) => {
