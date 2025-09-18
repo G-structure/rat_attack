@@ -64,3 +64,17 @@
     - js: N/A
     - rust: cargo test --test ws_upgrade
     - follow-ups: Next could be initialize with bridgeId (REQ-300) or JSON-RPC framing (REQ-011)
+
+# PLAN 003 — Subprotocol list handling
+[test session](https://opencode.ai/s/Z7AQ6xxy)
+[code session](https://opencode.ai/s/DoZE95iu)
+
+[x] 003 — Subprotocol list handling
+• acceptance: Bridge accepts handshake when acp.jsonrpc.v1 is among offered subprotocols and echoes it.
+• prompts: [prompts/003_test.md](./prompts/003_test.md), [prompts/003_code.md](./prompts/003_code.md)
+• status: planned
+• notes:
+    - context: WebSocket upgrade handling in src/main.rs; integration coverage in tests/ws_upgrade.rs
+    - js: not run
+    - rust: not run
+    - follow-ups: ensure initialize handshake covers bridgeId (RAT-LWS-REQ-300)

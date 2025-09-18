@@ -119,3 +119,54 @@ async fn test_different_subprotocol_close_1008() {
         panic!("Expected close frame");
     }
 }
+
+#[tokio::test]
+async fn test_multiple_subprotocols_with_acp_accept() {
+    let url = "ws://localhost:8137";
+    let key = generate_key();
+    let request = Request::builder()
+        .uri(url)
+        .header("Host", "localhost:8137")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Key", key)
+        .header("Sec-WebSocket-Version", "13")
+        .header("Origin", "http://localhost:5173")
+        .header("Sec-WebSocket-Protocol", "acp.jsonrpc.v1, other.protocol")
+        .body(())
+        .unwrap();
+    let (_stream, response) = connect_async(request)
+        .await
+        .expect("WS upgrade should succeed with acp in multiple subprotocols");
+    assert_eq!(
+        response.headers().get("sec-websocket-protocol").unwrap(),
+        "acp.jsonrpc.v1"
+    );
+}
+
+#[tokio::test]
+async fn test_multiple_subprotocols_without_acp_reject() {
+    let url = "ws://localhost:8137";
+    let key = generate_key();
+    let request = Request::builder()
+        .uri(url)
+        .header("Host", "localhost:8137")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Key", key)
+        .header("Sec-WebSocket-Version", "13")
+        .header("Origin", "http://localhost:5173")
+        .header("Sec-WebSocket-Protocol", "other.protocol, another.one")
+        .body(())
+        .unwrap();
+    let (mut stream, _response) = connect_async(request)
+        .await
+        .expect("WS upgrade should succeed initially");
+    // Read the close frame
+    let msg = stream.next().await.unwrap().unwrap();
+    if let tungstenite::Message::Close(frame) = msg {
+        assert_eq!(frame.unwrap().code, CloseCode::Policy);
+    } else {
+        panic!("Expected close frame");
+    }
+}

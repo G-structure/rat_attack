@@ -38,7 +38,13 @@ async fn run_server(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                             .headers()
                             .get("sec-websocket-protocol")
                             .and_then(|v| v.to_str().ok());
-                        let is_valid = offered_proto == Some("acp.jsonrpc.v1");
+                        let is_valid = offered_proto
+                            .map(|s| {
+                                s.split(',')
+                                    .map(|p| p.trim())
+                                    .any(|p| p == "acp.jsonrpc.v1")
+                            })
+                            .unwrap_or(false);
                         *callback_valid.lock().unwrap() = is_valid;
                         if is_valid {
                             res.headers_mut().insert(
