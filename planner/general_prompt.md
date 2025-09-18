@@ -29,7 +29,7 @@ Ground Rules (read carefully)
 	4.	Small diffs only: Prefer 1–3 files per step. Defer broad restructuring unless explicitly requested.
 	5.	Deterministic execution: Provide exact commands and expected observable outcomes. Assume a POSIX-like shell unless otherwise instructed.
 	6.	Idempotency: Plans should be safe to re-run; include checks (e.g., “skip if exists”).
-	7.	Evidence over claims: After each step, capture proof (file tree snippets, command output excerpts, version checks) under planner/notes/ and link it from planner/progress.md.
+	7.	Evidence over claims: After each step, append proof (file tree snippets, command output excerpts, version checks) as new `§` blocks in planner/notes/<step-id>*.md and link them from planner/progress.md.
 	8.	Safety: Validate paths; no secrets in logs; never auto-opt-in telemetry; prefer local/no-network operations unless approved.
 
 ⸻
@@ -96,7 +96,7 @@ Use one or more of the following, tailored to the task:
 	•	Generated artifact checksum or size/range (when appropriate).
 	•	Docs: A short usage snippet or README section created/updated.
 
-Always append these as new `§` entries in planner/notes/<step-id>* .md files and link them.
+Always append these as new `§` entries in planner/notes/<step-id>*.md files and link them.
 
 ⸻
 
@@ -133,7 +133,7 @@ Update Discipline
 Commit & PR Hygiene (if VCS is in use)
 	•	Commit messages: chore(step-<id>): <concise title> with a bullet list referencing touched paths.
 	•	Group related micro-changes into one commit per step.
-	•	If a PR is required, create a description mirroring the plan/results and link to planner/notes/<step-id>.md.
+	•	If a PR is required, create a description mirroring the plan/results and link to planner/notes/<step-id>*.md.
 
 ⸻
 
