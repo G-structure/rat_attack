@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -135,9 +136,9 @@ impl NotificationSender for WebSocketNotificationSender {
             });
 
             let mut guard = stream.lock().await;
-            send_json(&mut *guard, payload)
-                .await
-                .map_err(|_| AgentTransportError::Internal("Failed to send notification".to_string()))?;
+            send_json(&mut guard, payload).await.map_err(|_| {
+                AgentTransportError::Internal("Failed to send notification".to_string())
+            })?;
             Ok(())
         })
     }
@@ -346,22 +347,26 @@ async fn handle_websocket(
                     Ok(value) => value,
                     Err(_) => {
                         let mut stream_guard = stream.lock().await;
-                        send_error(&mut *stream_guard, Value::Null, acp::Error::parse_error()).await?;
+                        send_error(&mut stream_guard, Value::Null, acp::Error::parse_error())
+                            .await?;
                         continue;
                     }
                 };
-                process_request(stream.clone(), &shared, &transport, &mut initialized, value).await?;
+                process_request(stream.clone(), &shared, &transport, &mut initialized, value)
+                    .await?;
             }
             Some(Ok(Message::Binary(bytes))) => {
                 let value: Value = match serde_json::from_slice(&bytes) {
                     Ok(value) => value,
                     Err(_) => {
                         let mut stream_guard = stream.lock().await;
-                        send_error(&mut *stream_guard, Value::Null, acp::Error::parse_error()).await?;
+                        send_error(&mut stream_guard, Value::Null, acp::Error::parse_error())
+                            .await?;
                         continue;
                     }
                 };
-                process_request(stream.clone(), &shared, &transport, &mut initialized, value).await?;
+                process_request(stream.clone(), &shared, &transport, &mut initialized, value)
+                    .await?;
             }
             Some(Ok(Message::Ping(payload))) => {
                 let mut stream_guard = stream.lock().await;
@@ -472,11 +477,13 @@ async fn process_request(
             let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
 
             // Convert from simple { sessionId, prompt } to ACP format
-            let session_id = params.get("sessionId")
+            let session_id = params
+                .get("sessionId")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let prompt_text = params.get("prompt")
+            let prompt_text = params
+                .get("prompt")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -501,6 +508,51 @@ async fn process_request(
                 }
             }
         }
+        "fs/read_text_file" => {
+            if !*initialized {
+                let error = acp::Error::method_not_found();
+                send_error_shared(&stream, id, error).await?;
+                return Ok(());
+            }
+
+            let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
+
+            // Extract parameters
+            let path = match params.get("path").and_then(|v| v.as_str()) {
+                Some(path) => path,
+                None => {
+                    send_error_shared(
+                        &stream,
+                        id,
+                        acp::Error::invalid_params().with_data("missing or invalid path parameter"),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+
+            let line_offset = params
+                .get("line_offset")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+
+            let line_limit = params
+                .get("line_limit")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+
+            match handle_read_text_file(path, line_offset, line_limit) {
+                Ok(content) => {
+                    let result = json!({
+                        "content": content
+                    });
+                    send_result_shared(&stream, id, result).await?;
+                }
+                Err(error) => {
+                    send_error_shared(&stream, id, error).await?;
+                }
+            }
+        }
         _ => {
             let error = acp::Error::method_not_found();
             send_error_shared(&stream, id, error).await?;
@@ -508,6 +560,110 @@ async fn process_request(
     }
 
     Ok(())
+}
+
+// TODO: Improve project root determination and overhaul sandboxing logic.
+// The current implementation blocks a set of hardcoded system directories
+// and resolves relative paths against the current working directory.
+// This approach is fragile and may allow directory traversal or
+// unintended access to files outside the intended project root.
+// Future work should compute the actual project root (e.g., via
+// environment variables, a .git directory, or a configuration file)
+// and enforce that all file accesses stay within that root.
+fn handle_read_text_file(
+    path: &str,
+    line_offset: Option<u32>,
+    line_limit: Option<u32>,
+) -> Result<String, acp::Error> {
+    let path_buf = PathBuf::from(path);
+
+    // Implement project root sandboxing per RAT-LWS-REQ-044
+    // Block access to sensitive system paths
+    if path.starts_with("/etc/")
+        || path.starts_with("/var/")
+        || path.starts_with("/root/")
+        || path.starts_with("/usr/")
+        || path.starts_with("/boot/")
+        || path.starts_with("/proc/")
+    {
+        return Err(acp::Error::internal_error().with_data("path outside project root"));
+    }
+
+    // For relative paths, resolve against current working directory
+    let resolved_path = if path_buf.is_absolute() {
+        path_buf
+    } else {
+        std::env::current_dir()
+            .map_err(|_| acp::Error::internal_error().with_data("failed to get current directory"))?
+            .join(&path_buf)
+    };
+
+    // Canonicalize to resolve .. and . components and prevent directory traversal
+    let canonical_path = resolved_path
+        .canonicalize()
+        .map_err(|_| acp::Error::internal_error().with_data("file not found"))?;
+
+    // Additional safety check: ensure the canonical path doesn't escape to system directories
+    let canonical_str = canonical_path.to_string_lossy();
+    if canonical_str.starts_with("/etc/")
+        || canonical_str.starts_with("/var/")
+        || canonical_str.starts_with("/root/")
+        || canonical_str.starts_with("/usr/")
+        || canonical_str.starts_with("/boot/")
+        || canonical_str.starts_with("/proc/")
+    {
+        return Err(acp::Error::internal_error().with_data("path outside project root"));
+    }
+
+    // First read as bytes to check for binary content
+    let bytes = std::fs::read(&canonical_path)
+        .map_err(|_| acp::Error::internal_error().with_data("file not found"))?;
+
+    // Check if it's likely a binary file (contains null bytes)
+    if bytes.contains(&0) {
+        return Err(acp::Error::internal_error().with_data("binary file not supported"));
+    }
+
+    // Convert to string
+    let content = String::from_utf8(bytes)
+        .map_err(|_| acp::Error::internal_error().with_data("file contains invalid UTF-8"))?;
+
+    apply_line_filter(&content, line_offset, line_limit)
+}
+
+fn apply_line_filter(
+    content: &str,
+    line_offset: Option<u32>,
+    line_limit: Option<u32>,
+) -> Result<String, acp::Error> {
+    let lines: Vec<&str> = content.lines().collect();
+
+    match (line_offset, line_limit) {
+        (Some(offset), Some(limit)) => {
+            let start_idx = (offset.saturating_sub(1) as usize).min(lines.len());
+            let end_idx = (start_idx + limit as usize).min(lines.len());
+
+            if start_idx >= lines.len() {
+                Ok(String::new())
+            } else {
+                Ok(lines[start_idx..end_idx].join("\n"))
+            }
+        }
+        (Some(offset), None) => {
+            let start_idx = (offset.saturating_sub(1) as usize).min(lines.len());
+
+            if start_idx >= lines.len() {
+                Ok(String::new())
+            } else {
+                Ok(lines[start_idx..].join("\n"))
+            }
+        }
+        (None, Some(limit)) => {
+            let end_idx = (limit as usize).min(lines.len());
+            Ok(lines[..end_idx].join("\n"))
+        }
+        (None, None) => Ok(content.to_string()),
+    }
 }
 
 fn ensure_bridge_meta(response: &mut acp::InitializeResponse, bridge_id: &str) {
@@ -551,7 +707,7 @@ async fn send_result_shared(
     result: Value,
 ) -> Result<(), tungstenite::Error> {
     let mut guard = stream.lock().await;
-    send_result(&mut *guard, id, result).await
+    send_result(&mut guard, id, result).await
 }
 
 async fn send_error_shared(
@@ -560,7 +716,7 @@ async fn send_error_shared(
     error: acp::Error,
 ) -> Result<(), tungstenite::Error> {
     let mut guard = stream.lock().await;
-    send_error(&mut *guard, id, error).await
+    send_error(&mut guard, id, error).await
 }
 
 async fn send_json(

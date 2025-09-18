@@ -61,7 +61,7 @@
     - handle agent notifications streaming to CT-WEB
     - add permission policy scaffolding per RAT-LWS-REQ-092
 
-§ PLAN 005 — session/prompt streaming notifications
+## PLAN 005 — session/prompt streaming notifications
 [x] 005 — session/prompt streaming notifications
 • acceptance: Bridge forwards `session/prompt` requests to agent and streams `session/update` notifications back to CT-WEB until final result with `stopReason`.
 • prompts: [prompts/005_test.md](./prompts/005_test.md), [prompts/005_code.md](./prompts/005_code.md)
@@ -75,7 +75,7 @@
     - implement actual streaming via NotificationSender to make remaining tests pass
     - add fs capability handling after streaming complete
 
-§ PLAN 005A — agent streaming notifications completion
+## PLAN 005A — agent streaming notifications completion
 [x] 005A — agent streaming notifications completion
 • acceptance: Agents can send session/update notifications through NotificationSender during prompt execution and notifications are relayed to CT-WEB
 • prompts: [prompts/005A_test.md](./prompts/005A_test.md), [prompts/005A_code.md](./prompts/005A_code.md)
@@ -88,16 +88,18 @@
 • next:
     - implement fs capability handling (fs/read_text_file, fs/write_text_file) per RAT-LWS-REQ-040/041
 
-§ PLAN 006 — fs/read_text_file capability
-[ ] 006 — fs/read_text_file capability
+## PLAN 006 — fs/read_text_file capability
+[x] 006 — fs/read_text_file capability
 • acceptance: Bridge implements `fs/read_text_file` method with optional line offset/limit and PR sandboxing per RAT-LWS-REQ-040/044
 • prompts: [prompts/006_test.md](./prompts/006_test.md), [prompts/006_code.md](./prompts/006_code.md)
-• status: planned
+• status: applied
 • notes:
     - context: src/lib.rs for fs/read_text_file method, tests/bridge_handshake.rs for fs tests
     - js: not-run
-    - rust: pending (new fs tests to be added)
-    - follow-ups: fs/write_text_file after read capability working
+    - rust: pass (all 14 tests pass - 6 new fs/read_text_file tests + 8 existing)
+    - implementation: Real file system access with relative/absolute path support, project root sandboxing, binary file detection, line offset/limit parameters
+    - test files: tests/fs_test_file.md (20 lines poem), tests/binary_test_file.bin (null bytes)
+    - follow-ups: fs/write_text_file with permission gating implementation ready
 • next:
     - implement fs/write_text_file with permission gating per RAT-LWS-REQ-041
     - add permission policy scaffolding per RAT-LWS-REQ-092

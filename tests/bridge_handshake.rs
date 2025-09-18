@@ -295,7 +295,9 @@ async fn bridge_forwards_session_new_after_initialize() {
 // These tests will fail until streaming functionality is implemented
 #[tokio::test(flavor = "multi_thread")]
 async fn bridge_streams_session_prompt_updates() {
-    let agent = Arc::new(FakeStreamingAgentTransport::new(success_initialize_response()));
+    let agent = Arc::new(FakeStreamingAgentTransport::new(
+        success_initialize_response(),
+    ));
     let harness = BridgeHarness::start(agent.clone()).await;
 
     let (mut ws, _) = harness
@@ -337,17 +339,23 @@ async fn bridge_streams_session_prompt_updates() {
     let mut final_response_received = false;
 
     // Collect streaming updates until we get the final response
-    for _ in 0..10 {  // max 10 messages to avoid infinite loop
+    for _ in 0..10 {
+        // max 10 messages to avoid infinite loop
         let message = next_message(&mut ws).await;
         let payload = parse_json(&message);
 
         if payload.get("method").and_then(|m| m.as_str()) == Some("session/update") {
             // Verify session/update notification format per RAT-LWS-REQ-011
-            assert!(payload.get("params").is_some(), "session/update must have params");
+            assert!(
+                payload.get("params").is_some(),
+                "session/update must have params"
+            );
             update_count += 1;
         } else if payload.get("id") == Some(&json!("prompt-1")) {
             // This should be the final response
-            let result = payload.get("result").expect("final response should have result");
+            let result = payload
+                .get("result")
+                .expect("final response should have result");
             assert!(
                 result.get("stopReason").is_some(),
                 "final response must contain stopReason per spec"
@@ -357,15 +365,23 @@ async fn bridge_streams_session_prompt_updates() {
         }
     }
 
-    assert!(update_count > 0, "should receive at least one session/update notification");
-    assert!(final_response_received, "should receive final response with stopReason");
+    assert!(
+        update_count > 0,
+        "should receive at least one session/update notification"
+    );
+    assert!(
+        final_response_received,
+        "should receive final response with stopReason"
+    );
 
     harness.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bridge_forwards_session_prompt_transparently() {
-    let agent = Arc::new(FakeStreamingAgentTransport::new(success_initialize_response()));
+    let agent = Arc::new(FakeStreamingAgentTransport::new(
+        success_initialize_response(),
+    ));
     let harness = BridgeHarness::start(agent.clone()).await;
 
     let (mut ws, _) = harness
@@ -399,7 +415,11 @@ async fn bridge_forwards_session_prompt_transparently() {
 
     // Verify the agent received the request transparently (RAT-LWS-REQ-011)
     let prompt_calls = agent.take_prompt_calls().await;
-    assert_eq!(prompt_calls.len(), 1, "session/prompt should be forwarded to agent");
+    assert_eq!(
+        prompt_calls.len(),
+        1,
+        "session/prompt should be forwarded to agent"
+    );
     assert_eq!(prompt_calls[0].prompt, test_prompt);
 
     harness.shutdown().await;
@@ -407,7 +427,9 @@ async fn bridge_forwards_session_prompt_transparently() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bridge_session_update_preserves_json_rpc_format() {
-    let agent = Arc::new(FakeStreamingAgentTransport::new(success_initialize_response()));
+    let agent = Arc::new(FakeStreamingAgentTransport::new(
+        success_initialize_response(),
+    ));
     let harness = BridgeHarness::start(agent.clone()).await;
 
     let (mut ws, _) = harness
@@ -422,18 +444,20 @@ async fn bridge_session_update_preserves_json_rpc_format() {
     let _session_response = next_message(&mut ws).await;
 
     // Configure agent to send specific notifications
-    agent.configure_streaming_updates(vec![
-        json!({
-            "sessionId": "test-session-id",
-            "chunk": {"type": "text", "content": "Hello"},
-            "index": 0
-        }),
-        json!({
-            "sessionId": "test-session-id",
-            "chunk": {"type": "text", "content": " world"},
-            "index": 1
-        })
-    ]).await;
+    agent
+        .configure_streaming_updates(vec![
+            json!({
+                "sessionId": "test-session-id",
+                "chunk": {"type": "text", "content": "Hello"},
+                "index": 0
+            }),
+            json!({
+                "sessionId": "test-session-id",
+                "chunk": {"type": "text", "content": " world"},
+                "index": 1
+            }),
+        ])
+        .await;
 
     // Send prompt request
     send_json_rpc(
@@ -565,9 +589,7 @@ impl AgentTransport for FakeAgentTransport {
         _notification_sender: Arc<dyn ct_bridge::NotificationSender>,
     ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>>
     {
-        Box::pin(async move {
-            Err(AgentTransportError::NotImplemented)
-        })
+        Box::pin(async move { Err(AgentTransportError::NotImplemented) })
     }
 }
 
@@ -652,11 +674,12 @@ impl AgentTransport for FakeStreamingAgentTransport {
         Box::pin(async move {
             let mut guard = state.lock().await;
             // Extract prompt text - for simplicity, assume first content block is text
-            let prompt_text = if let Some(acp::ContentBlock::Text(text_content)) = request.prompt.first() {
-                text_content.text.clone()
-            } else {
-                "unknown prompt".to_string()
-            };
+            let prompt_text =
+                if let Some(acp::ContentBlock::Text(text_content)) = request.prompt.first() {
+                    text_content.text.clone()
+                } else {
+                    "unknown prompt".to_string()
+                };
 
             guard.prompt_calls.push(PromptRequest {
                 session_id: request.session_id.0.to_string(),
@@ -670,8 +693,11 @@ impl AgentTransport for FakeStreamingAgentTransport {
 
             // Send session/update notifications for each streaming update
             for update in streaming_updates {
-                if let Err(e) = notification_sender.send_notification("session/update", update).await {
-                    eprintln!("Failed to send session/update notification: {:?}", e);
+                if let Err(e) = notification_sender
+                    .send_notification("session/update", update)
+                    .await
+                {
+                    eprintln!("Failed to send session/update notification: {e:?}");
                 }
             }
 
@@ -693,12 +719,15 @@ impl AgentTransport for FakeStreamingAgentTransport {
                         "sessionId": request.session_id.0,
                         "chunk": {"type": "text", "content": " about your request"},
                         "index": 2
-                    })
+                    }),
                 ];
 
                 for update in default_updates {
-                    if let Err(e) = notification_sender.send_notification("session/update", update).await {
-                        eprintln!("Failed to send default session/update notification: {:?}", e);
+                    if let Err(e) = notification_sender
+                        .send_notification("session/update", update)
+                        .await
+                    {
+                        eprintln!("Failed to send default session/update notification: {e:?}");
                     }
                 }
             }
@@ -877,11 +906,26 @@ async fn fs_read_text_file_basic_functionality() {
     assert_eq!(payload.get("id"), Some(&json!("read-1")));
 
     // Verify we get the expected file content
-    let result = payload.get("result").expect("fs/read_text_file should return success result when implemented");
-    assert!(result.get("content").is_some(), "result should contain file content");
-    let content = result.get("content").unwrap().as_str().expect("content should be a string");
-    assert!(content.contains("In the hush of dawn, love whispers soft as dew"), "should contain first line of poem");
-    assert!(content.contains("And in its gentle hold, true peace is found."), "should contain last line of poem");
+    let result = payload
+        .get("result")
+        .expect("fs/read_text_file should return success result when implemented");
+    assert!(
+        result.get("content").is_some(),
+        "result should contain file content"
+    );
+    let content = result
+        .get("content")
+        .unwrap()
+        .as_str()
+        .expect("content should be a string");
+    assert!(
+        content.contains("In the hush of dawn, love whispers soft as dew"),
+        "should contain first line of poem"
+    );
+    assert!(
+        content.contains("And in its gentle hold, true peace is found."),
+        "should contain last line of poem"
+    );
 
     harness.shutdown().await;
 }
@@ -922,14 +966,26 @@ async fn fs_read_text_file_with_line_offset_and_limit() {
     assert_eq!(payload.get("id"), Some(&json!("read-offset-1")));
 
     // Verify we get the limited file content
-    let result = payload.get("result").expect("fs/read_text_file should return success result when implemented");
-    assert!(result.get("content").is_some(), "result should contain limited file content");
-    let content = result.get("content").unwrap().as_str().expect("content should be a string");
+    let result = payload
+        .get("result")
+        .expect("fs/read_text_file should return success result when implemented");
+    assert!(
+        result.get("content").is_some(),
+        "result should contain limited file content"
+    );
+    let content = result
+        .get("content")
+        .unwrap()
+        .as_str()
+        .expect("content should be a string");
 
     // Verify that only the requested lines are returned (lines 5-14, 10 lines total)
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(lines.len(), 10, "should return exactly 10 lines");
-    assert!(content.contains("Love is the fire that warms the coldest night"), "should contain line 6 (offset from line 5)");
+    assert!(
+        content.contains("Love is the fire that warms the coldest night"),
+        "should contain line 6 (offset from line 5)"
+    );
 
     harness.shutdown().await;
 }
@@ -968,10 +1024,18 @@ async fn fs_read_text_file_enforces_project_root_sandbox() {
     assert_eq!(payload.get("id"), Some(&json!("read-oob-1")));
 
     // This should return an error for out-of-bounds access (not method not found)
-    let error = payload.get("error").expect("should have error for out-of-bounds access");
-    let error_code = error.get("code").and_then(|c| c.as_i64()).expect("error should have numeric code");
+    let error = payload
+        .get("error")
+        .expect("should have error for out-of-bounds access");
+    let error_code = error
+        .get("code")
+        .and_then(|c| c.as_i64())
+        .expect("error should have numeric code");
     // Should be permission denied (e.g., -32000) or similar, not method not found (-32601)
-    assert_ne!(error_code, -32601, "should be permission error, not method not found");
+    assert_ne!(
+        error_code, -32601,
+        "should be permission error, not method not found"
+    );
 
     harness.shutdown().await;
 }
@@ -1010,10 +1074,18 @@ async fn fs_read_text_file_rejects_missing_files() {
     assert_eq!(payload.get("id"), Some(&json!("read-missing-1")));
 
     // This should return an error for missing file (not method not found)
-    let error = payload.get("error").expect("should have error for missing file");
-    let error_code = error.get("code").and_then(|c| c.as_i64()).expect("error should have numeric code");
+    let error = payload
+        .get("error")
+        .expect("should have error for missing file");
+    let error_code = error
+        .get("code")
+        .and_then(|c| c.as_i64())
+        .expect("error should have numeric code");
     // Should be file not found error, not method not found (-32601)
-    assert_ne!(error_code, -32601, "should be file not found error, not method not found");
+    assert_ne!(
+        error_code, -32601,
+        "should be file not found error, not method not found"
+    );
 
     harness.shutdown().await;
 }
@@ -1052,10 +1124,18 @@ async fn fs_read_text_file_rejects_binary_files() {
     assert_eq!(payload.get("id"), Some(&json!("read-binary-1")));
 
     // This should return an error for binary file (not method not found)
-    let error = payload.get("error").expect("should have error for binary file");
-    let error_code = error.get("code").and_then(|c| c.as_i64()).expect("error should have numeric code");
+    let error = payload
+        .get("error")
+        .expect("should have error for binary file");
+    let error_code = error
+        .get("code")
+        .and_then(|c| c.as_i64())
+        .expect("error should have numeric code");
     // Should be binary file error, not method not found (-32601)
-    assert_ne!(error_code, -32601, "should be binary file error, not method not found");
+    assert_ne!(
+        error_code, -32601,
+        "should be binary file error, not method not found"
+    );
 
     harness.shutdown().await;
 }
@@ -1098,12 +1178,23 @@ async fn fs_read_text_file_handles_out_of_bounds_line_parameters() {
     // This should handle gracefully - either return empty content or appropriate error
     if let Some(result) = payload.get("result") {
         // Should return empty content or indicate no lines available
-        assert!(result.get("content").is_some(), "result should contain content field");
+        assert!(
+            result.get("content").is_some(),
+            "result should contain content field"
+        );
     } else {
         // Should handle out-of-bounds appropriately, not return method not found
-        let error = payload.get("error").expect("should have error for out-of-bounds parameters");
-        let error_code = error.get("code").and_then(|c| c.as_i64()).expect("error should have numeric code");
-        assert_ne!(error_code, -32601, "should handle out-of-bounds error, not method not found");
+        let error = payload
+            .get("error")
+            .expect("should have error for out-of-bounds parameters");
+        let error_code = error
+            .get("code")
+            .and_then(|c| c.as_i64())
+            .expect("error should have numeric code");
+        assert_ne!(
+            error_code, -32601,
+            "should handle out-of-bounds error, not method not found"
+        );
     }
 
     harness.shutdown().await;
