@@ -5,6 +5,8 @@ use tungstenite::handshake::client::generate_key;
 use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::Message;
 
+use tokio::time::{timeout, Duration};
+
 #[tokio::test]
 async fn test_valid_origin_upgrade() {
     let url = "ws://localhost:8137";
@@ -580,4 +582,173 @@ async fn test_initialize_fs_write_missing() {
     let error = &response["error"];
     assert_eq!(error["code"], -32602);
     assert!(error["message"].is_string());
+}
+
+#[tokio::test]
+async fn test_fs_read_within_project_root() {
+    let test_file_path = "/Users/luc/projects/vibes/rat_attack/test_fs_read.txt";
+    let content = "Hello, world!";
+    std::fs::write(test_file_path, content).unwrap();
+
+    let url = "ws://localhost:8137";
+    let key = generate_key();
+    let request = Request::builder()
+        .uri(url)
+        .header("Host", "localhost:8137")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Key", key)
+        .header("Sec-WebSocket-Version", "13")
+        .header("Origin", "http://localhost:5173")
+        .header("Sec-WebSocket-Protocol", "acp.jsonrpc.v1")
+        .body(())
+        .unwrap();
+    let (mut stream, _response) = connect_async(request)
+        .await
+        .expect("WS upgrade should succeed");
+
+    // send initialize
+    let init_request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "capabilities": {
+                "fs": {
+                    "readTextFile": true,
+                    "writeTextFile": true
+                }
+            }
+        }
+    });
+    stream
+        .send(Message::Text(init_request.to_string()))
+        .await
+        .unwrap();
+
+    // receive init response
+    let msg = stream.next().await.unwrap().unwrap();
+    let response_text = match msg {
+        Message::Text(text) => text,
+        _ => panic!("Expected text message"),
+    };
+    let response: Value = serde_json::from_str(&response_text).unwrap();
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 1);
+    assert!(response["result"].is_object());
+
+    // send fs/read_text_file
+    let read_request = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "fs/read_text_file",
+        "params": {
+            "path": test_file_path
+        }
+    });
+    stream
+        .send(Message::Text(read_request.to_string()))
+        .await
+        .unwrap();
+
+    // wait for response with timeout
+    let response_future = stream.next();
+    let result = timeout(Duration::from_secs(1), response_future).await;
+    match result {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            let response: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["jsonrpc"], "2.0");
+            assert_eq!(response["id"], 2);
+            assert!(response["result"].is_object());
+            let result = &response["result"];
+            assert_eq!(result["content"], content);
+        }
+        _ => panic!("Expected successful response within timeout"),
+    }
+
+    // cleanup
+    std::fs::remove_file(test_file_path).unwrap();
+}
+
+#[tokio::test]
+async fn test_fs_read_outside_project_root() {
+    let url = "ws://localhost:8137";
+    let key = generate_key();
+    let request = Request::builder()
+        .uri(url)
+        .header("Host", "localhost:8137")
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Key", key)
+        .header("Sec-WebSocket-Version", "13")
+        .header("Origin", "http://localhost:5173")
+        .header("Sec-WebSocket-Protocol", "acp.jsonrpc.v1")
+        .body(())
+        .unwrap();
+    let (mut stream, _response) = connect_async(request)
+        .await
+        .expect("WS upgrade should succeed");
+
+    // send initialize
+    let init_request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "capabilities": {
+                "fs": {
+                    "readTextFile": true,
+                    "writeTextFile": true
+                }
+            }
+        }
+    });
+    stream
+        .send(Message::Text(init_request.to_string()))
+        .await
+        .unwrap();
+
+    // receive init response
+    let msg = stream.next().await.unwrap().unwrap();
+    let response_text = match msg {
+        Message::Text(text) => text,
+        _ => panic!("Expected text message"),
+    };
+    let response: Value = serde_json::from_str(&response_text).unwrap();
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 1);
+    assert!(response["result"].is_object());
+
+    // send fs/read_text_file outside
+    let read_request = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "fs/read_text_file",
+        "params": {
+            "path": "/tmp/test_fs_read.txt"
+        }
+    });
+    stream
+        .send(Message::Text(read_request.to_string()))
+        .await
+        .unwrap();
+
+    // wait for response with timeout
+    let response_future = stream.next();
+    let result = timeout(Duration::from_secs(1), response_future).await;
+    match result {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            let response: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(response["jsonrpc"], "2.0");
+            assert_eq!(response["id"], 2);
+            assert!(response["error"].is_object());
+            let error = &response["error"];
+            assert_eq!(error["code"], -32000);
+            assert!(error["message"].is_string());
+            assert!(error["data"].is_object());
+            let data = &error["data"];
+            assert!(data["details"].is_string());
+        }
+        _ => panic!("Expected error response within timeout"),
+    }
 }

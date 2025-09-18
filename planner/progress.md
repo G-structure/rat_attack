@@ -108,3 +108,21 @@
     - follow-ups: consider terminal capability advertisement (RAT-LWS-REQ-060)
 • next: explore RAT-LWS-REQ-021 agent capability negotiation
 • next: prep auth preflight coverage for RAT-LWS-REQ-022
+
+## PLAN 006 — Sandboxed fs/read_text_file
+[test session](https://opencode.ai/s/1afzPkdm)
+[code session](https://opencode.ai/s/OcFB46Q7)
+
+[x] 006 — Sandboxed fs/read_text_file
+• acceptance: Implement JSON-RPC fs/read_text_file with project-root sandboxing and structured errors.
+• prompts: [prompts/006_test.md](./prompts/006_test.md), [prompts/006_code.md](./prompts/006_code.md)
+• status: applied
+• notes:
+    - context: src/main.rs; tests/ws_upgrade.rs
+    - js: not run (no frontend tests configured)
+    - rust: cargo test --test ws_upgrade (16/16 tests pass)
+    - implemented: project root config, path validation, JSON-RPC handler, structured errors
+    - follow-ups: fs/write_text_file + approvals next
+• next: RAT-LWS-REQ-041 — gate fs/write_text_file via permissions
+• next: RAT-LWS-REQ-062 — terminal command permissions & sandbox enforcement
+• next: RAT-LWS-REQ-003 — permessage-deflate negotiation guard
