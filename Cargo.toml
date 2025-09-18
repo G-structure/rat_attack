@@ -8,3 +8,4 @@ agent-client-protocol = "0.4.0"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.20"
 tungstenite = "0.20"
+futures = "0.3"

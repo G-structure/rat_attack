@@ -50,3 +50,17 @@
 **Prompts/Notes:** prompts/001_code.md, prompts/001_test.md
 
 **Status:** APPLIED
+
+## PLAN 002 — Implement WS Subprotocol Echo
+[test session](https://opencode.ai/s/K777n09f)
+[code session](https://opencode.ai/s/6cjeYEUS)
+
+[x] 002 — Implement WS Subprotocol Echo
+• acceptance: CT-BRIDGE MUST echo exactly "acp.jsonrpc.v1" when offered in Sec-WebSocket-Protocol; if not offered or different, close with code 1008.
+• prompts: prompts/002_test.md, prompts/002_code.md
+• status: applied
+• notes:
+    - context: WS upgrade handling in src/main.rs; tests in tests/ws_upgrade.rs
+    - js: N/A
+    - rust: cargo test --test ws_upgrade
+    - follow-ups: Next could be initialize with bridgeId (REQ-300) or JSON-RPC framing (REQ-011)

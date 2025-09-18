@@ -156,6 +156,7 @@ name = "ct-bridge"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "futures",
  "tokio",
  "tokio-tungstenite",
  "tungstenite",
