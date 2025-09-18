@@ -158,6 +158,14 @@ pub trait AgentTransport: Send + Sync + 'static {
         request: acp::PromptRequest,
         notification_sender: Arc<dyn NotificationSender>,
     ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>>;
+    fn request_permission(
+        &self,
+        request: acp::RequestPermissionRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<acp::RequestPermissionResponse, AgentTransportError>> + Send,
+        >,
+    >;
 }
 
 pub fn serve(
@@ -553,6 +561,76 @@ async fn process_request(
                 }
             }
         }
+        "fs/write_text_file" => {
+            if !*initialized {
+                let error = acp::Error::method_not_found();
+                send_error_shared(&stream, id, error).await?;
+                return Ok(());
+            }
+
+            let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
+
+            // Extract parameters
+            let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
+                Some(session_id) => session_id,
+                None => {
+                    send_error_shared(
+                        &stream,
+                        id,
+                        acp::Error::invalid_params()
+                            .with_data("missing or invalid sessionId parameter"),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+
+            let path = match params.get("path").and_then(|v| v.as_str()) {
+                Some(path) => path,
+                None => {
+                    send_error_shared(
+                        &stream,
+                        id,
+                        acp::Error::invalid_params().with_data("missing or invalid path parameter"),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+
+            let content = match params.get("content").and_then(|v| v.as_str()) {
+                Some(content) => content,
+                None => {
+                    send_error_shared(
+                        &stream,
+                        id,
+                        acp::Error::invalid_params()
+                            .with_data("missing or invalid content parameter"),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+
+            match handle_write_text_file(
+                stream.clone(),
+                shared,
+                transport,
+                session_id,
+                path,
+                content,
+            )
+            .await
+            {
+                Ok(_) => {
+                    let result = json!({});
+                    send_result_shared(&stream, id, result).await?;
+                }
+                Err(error) => {
+                    send_error_shared(&stream, id, error).await?;
+                }
+            }
+        }
         _ => {
             let error = acp::Error::method_not_found();
             send_error_shared(&stream, id, error).await?;
@@ -570,11 +648,7 @@ async fn process_request(
 // Future work should compute the actual project root (e.g., via
 // environment variables, a .git directory, or a configuration file)
 // and enforce that all file accesses stay within that root.
-fn handle_read_text_file(
-    path: &str,
-    line_offset: Option<u32>,
-    line_limit: Option<u32>,
-) -> Result<String, acp::Error> {
+fn validate_and_resolve_path(path: &str, for_write: bool) -> Result<PathBuf, acp::Error> {
     let path_buf = PathBuf::from(path);
 
     // Implement project root sandboxing per RAT-LWS-REQ-044
@@ -598,10 +672,29 @@ fn handle_read_text_file(
             .join(&path_buf)
     };
 
-    // Canonicalize to resolve .. and . components and prevent directory traversal
-    let canonical_path = resolved_path
-        .canonicalize()
-        .map_err(|_| acp::Error::internal_error().with_data("file not found"))?;
+    // Canonicalize path, handling the case where file doesn't exist for writes
+    let canonical_path = if for_write && !resolved_path.exists() {
+        // For write operations, canonicalize the parent directory since the file may not exist yet
+        let parent = resolved_path
+            .parent()
+            .ok_or_else(|| acp::Error::internal_error().with_data("invalid path"))?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|_| acp::Error::internal_error().with_data("invalid path"))?;
+        canonical_parent.join(
+            resolved_path
+                .file_name()
+                .ok_or_else(|| acp::Error::internal_error().with_data("invalid path"))?,
+        )
+    } else {
+        resolved_path.canonicalize().map_err(|_| {
+            acp::Error::internal_error().with_data(if for_write {
+                "invalid path"
+            } else {
+                "file not found"
+            })
+        })?
+    };
 
     // Additional safety check: ensure the canonical path doesn't escape to system directories
     let canonical_str = canonical_path.to_string_lossy();
@@ -614,6 +707,16 @@ fn handle_read_text_file(
     {
         return Err(acp::Error::internal_error().with_data("path outside project root"));
     }
+
+    Ok(canonical_path)
+}
+
+fn handle_read_text_file(
+    path: &str,
+    line_offset: Option<u32>,
+    line_limit: Option<u32>,
+) -> Result<String, acp::Error> {
+    let canonical_path = validate_and_resolve_path(path, false)?;
 
     // First read as bytes to check for binary content
     let bytes = std::fs::read(&canonical_path)
@@ -663,6 +766,107 @@ fn apply_line_filter(
             Ok(lines[..end_idx].join("\n"))
         }
         (None, None) => Ok(content.to_string()),
+    }
+}
+
+async fn handle_write_text_file(
+    _stream: Arc<TokioMutex<WebSocketStream<TcpStream>>>,
+    _shared: &BridgeSharedConfig,
+    transport: &Arc<dyn AgentTransport>,
+    session_id: &str,
+    path: &str,
+    content: &str,
+) -> Result<(), acp::Error> {
+    use std::fs;
+
+    // First, check sandboxing
+    let canonical_path = validate_and_resolve_path(path, true)?;
+
+    // Create parent directories if they don't exist
+    if let Some(parent) = canonical_path.parent() {
+        fs::create_dir_all(parent).map_err(|_| {
+            acp::Error::internal_error().with_data("failed to create parent directories")
+        })?;
+    }
+
+    // Now request permission from the agent
+    let permission_request = acp::RequestPermissionRequest {
+        session_id: acp::SessionId(session_id.to_string().into()),
+        tool_call: acp::ToolCallUpdate {
+            id: acp::ToolCallId("fs_write_text_file".to_string().into()),
+            fields: acp::ToolCallUpdateFields {
+                kind: Some(acp::ToolKind::Edit),
+                title: Some(format!("Write file: {path}")),
+                status: Some(acp::ToolCallStatus::InProgress),
+                ..Default::default()
+            },
+            meta: None,
+        },
+        options: vec![
+            acp::PermissionOption {
+                id: acp::PermissionOptionId("allow_once".to_string().into()),
+                name: "Allow this write operation".to_string(),
+                kind: acp::PermissionOptionKind::AllowOnce,
+                meta: None,
+            },
+            acp::PermissionOption {
+                id: acp::PermissionOptionId("allow_always".to_string().into()),
+                name: "Allow all write operations".to_string(),
+                kind: acp::PermissionOptionKind::AllowAlways,
+                meta: None,
+            },
+            acp::PermissionOption {
+                id: acp::PermissionOptionId("reject_once".to_string().into()),
+                name: "Reject this write operation".to_string(),
+                kind: acp::PermissionOptionKind::RejectOnce,
+                meta: None,
+            },
+            acp::PermissionOption {
+                id: acp::PermissionOptionId("reject_always".to_string().into()),
+                name: "Reject all write operations".to_string(),
+                kind: acp::PermissionOptionKind::RejectAlways,
+                meta: None,
+            },
+        ],
+        meta: None,
+    };
+
+    let permission_response = transport
+        .request_permission(permission_request)
+        .await
+        .map_err(|_| acp::Error::internal_error().with_data("permission request failed"))?;
+
+    // Check the permission outcome
+    match permission_response.outcome {
+        acp::RequestPermissionOutcome::Selected { option_id } => {
+            match option_id.0.as_ref() {
+                "allow_once" | "allow_always" => {
+                    // Permission granted, proceed with write
+                    fs::write(&canonical_path, content).map_err(|_| {
+                        acp::Error::internal_error().with_data("failed to write file")
+                    })?;
+                    Ok(())
+                }
+                "reject_once" | "reject_always" => {
+                    // Permission denied
+                    Err(acp::Error::new((-32000, "Permission denied".to_string())))
+                }
+                _ => {
+                    // Unknown option
+                    Err(acp::Error::new((
+                        -32000,
+                        "Unknown permission option".to_string(),
+                    )))
+                }
+            }
+        }
+        acp::RequestPermissionOutcome::Cancelled => {
+            // Permission request was cancelled
+            Err(acp::Error::new((
+                -32000,
+                "Permission request cancelled".to_string(),
+            )))
+        }
     }
 }
 

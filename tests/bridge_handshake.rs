@@ -591,6 +591,17 @@ impl AgentTransport for FakeAgentTransport {
     {
         Box::pin(async move { Err(AgentTransportError::NotImplemented) })
     }
+
+    fn request_permission(
+        &self,
+        _request: acp::RequestPermissionRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<acp::RequestPermissionResponse, AgentTransportError>> + Send,
+        >,
+    > {
+        Box::pin(async move { Err(AgentTransportError::NotImplemented) })
+    }
 }
 
 #[derive(Clone)]
@@ -739,6 +750,17 @@ impl AgentTransport for FakeStreamingAgentTransport {
                 meta: None,
             })
         })
+    }
+
+    fn request_permission(
+        &self,
+        _request: acp::RequestPermissionRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<acp::RequestPermissionResponse, AgentTransportError>> + Send,
+        >,
+    > {
+        Box::pin(async move { Err(AgentTransportError::NotImplemented) })
     }
 }
 
@@ -1290,6 +1312,27 @@ impl AgentTransport for FakePermissionAgentTransport {
     {
         Box::pin(async move { Err(AgentTransportError::NotImplemented) })
     }
+
+    fn request_permission(
+        &self,
+        request: acp::RequestPermissionRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<acp::RequestPermissionResponse, AgentTransportError>> + Send,
+        >,
+    > {
+        let state = self.state.clone();
+        Box::pin(async move {
+            let mut guard = state.lock().await;
+            guard.permission_calls.push(request);
+            match guard.permission_response.clone() {
+                Some(response) => Ok(response),
+                None => Err(AgentTransportError::Internal(
+                    "No permission response configured".to_string(),
+                )),
+            }
+        })
+    }
 }
 
 // Tests for fs/write_text_file with permission gating per RAT-LWS-REQ-041
@@ -1297,7 +1340,9 @@ impl AgentTransport for FakePermissionAgentTransport {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fs_write_text_file_requires_permission_approval() {
-    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
     let harness = BridgeHarness::start(agent.clone()).await;
 
     let (mut ws, _) = harness
@@ -1384,7 +1429,9 @@ async fn fs_write_text_file_requires_permission_approval() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fs_write_text_file_rejects_on_permission_deny() {
-    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
     let harness = BridgeHarness::start(agent.clone()).await;
 
     let (mut ws, _) = harness
@@ -1462,7 +1509,9 @@ async fn fs_write_text_file_rejects_on_permission_deny() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fs_write_text_file_handles_permission_cancellation() {
-    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
     let harness = BridgeHarness::start(agent.clone()).await;
 
     let (mut ws, _) = harness
@@ -1538,7 +1587,9 @@ async fn fs_write_text_file_handles_permission_cancellation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fs_write_text_file_enforces_project_root_sandbox() {
-    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
     let harness = BridgeHarness::start(agent.clone()).await;
 
     let (mut ws, _) = harness
@@ -1607,7 +1658,9 @@ async fn fs_write_text_file_enforces_project_root_sandbox() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fs_write_text_file_permission_flow_with_allow_always() {
-    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
     let harness = BridgeHarness::start(agent.clone()).await;
 
     let (mut ws, _) = harness
@@ -1685,7 +1738,9 @@ async fn fs_write_text_file_permission_flow_with_allow_always() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fs_write_text_file_permission_flow_with_reject_always() {
-    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
     let harness = BridgeHarness::start(agent.clone()).await;
 
     let (mut ws, _) = harness
@@ -1768,7 +1823,9 @@ async fn fs_write_text_file_permission_flow_with_reject_always() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fs_write_text_file_validates_permission_before_execution() {
-    let agent = Arc::new(FakePermissionAgentTransport::new(success_initialize_response()));
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
     let harness = BridgeHarness::start(agent.clone()).await;
 
     let (mut ws, _) = harness
