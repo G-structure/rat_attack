@@ -12,6 +12,7 @@ On each step you will:
 Hard rules
 	•	Never edit planner/spec.md. It is read-only source of truth.
 	•	Always read planner/human.md before planning; it contains long-term feedback, hints, and constraints from the user.
+	•	Treat planner/progress.md as append-only: append new entries or updates without rewriting existing lines, and start every block with the sentinel character `§` so the latest step is easy to find.
 	•	Keep steps tiny. Prefer work that touches 1–3 files with a single acceptance test and one code change.
 	•	TDD only. Every step centers on a failing test that will be made to pass, then refactor, then lint/format, then re-test.
 	•	Mobile-first + Rust backend context: Frontend is SolidJS (Vitest + Testing Library); backend/tools are Rust (unit tests in src/**, integration tests in tests/**).
@@ -21,7 +22,7 @@ Hard rules
 Repository contract (you enforce it)
 	•	planner/spec.md — authoritative spec (read-only).
 	•	planner/human.md — human guidance and hints (read at the start of each step).
-	•	planner/progress.md — your running checklist (you maintain it).
+	•	planner/progress.md — append-only running checklist you maintain; never edit or delete existing lines. Start each block with `§` (e.g., `§ PLAN 005`, `§ UPDATE 005`) so the active step is searchable.
 	•	planner/prompts/ — your step prompts live here as:
 	•	planner/prompts/{NNN}_test.md — prompt for the Test-Writer agent.
 	•	planner/prompts/{NNN}_code.md — prompt for the Code-Solver agent.
@@ -38,7 +39,7 @@ Global commands palette (copy/paste exactly)
 	•	All-tests pass gate (you run to evaluate a step):
 pnpm vitest --run && cargo test
 
-If commands differ in your repo, adjust once in planner/progress.md “Commands” section and then reuse consistently.
+If commands differ in your repo, append a new `§ COMMANDS` block to planner/progress.md and reuse it consistently.
 
 ⸻
 
@@ -60,15 +61,16 @@ At the beginning of every step:
 	•	Number the step (NNN). Create:
 	•	planner/prompts/{NNN}_test.md (Test-Writer prompt) — see template A below.
 	•	planner/prompts/{NNN}_code.md (Code-Solver prompt) — see template B below.
-	5.	Update the checklist
-	•	Append a new checklist entry at the top of planner/progress.md with:
+	5.	Update the checklist (append-only log)
+	•	Append a `§ PLAN NNN — <short title>` block to the end of planner/progress.md; never rewrite earlier text.
+	•	Inside that block, restate:
 	•	[ ] NNN — <short title>
 • acceptance: one line summary
 • prompts: prompts/{NNN}_test.md, prompts/{NNN}_code.md
 • status: planned | tests-failing | green | refactored | done | blocked
 • notes: (you fill in quick observations, links to commits/PRs)
 • JS: pass/fail summary; • Rust: pass/fail summary
-	•	Maintain a small “Next candidates” list with 2–3 likely next micro-tasks, each mapped to spec sections/Req IDs.
+	•	Keep the “Next candidates” context by appending fresh bullets inside the same block (e.g., `• next:` lines) so the historical list remains intact.
 	6.	Hand off & evaluate
 	•	The Test-Writer agent will run using {NNN}_test.md and produce tests that fail.
 Then the Code-Solver agent will use {NNN}_code.md and push code until all tests pass.
@@ -81,7 +83,7 @@ cargo clippy --fix -q && cargo fmt
 pnpm vitest --run && cargo test
 
 
-	•	Update the status field in planner/progress.md and append bullet notes (what passed, what remains, diffs touched, any follow-ups).
+	•	Append a `§ UPDATE NNN` block to planner/progress.md capturing the latest status, bullet notes (what passed, what remains, diffs touched, follow-ups), and current JS/Rust results—never modify earlier blocks.
 	•	If tests are flaky, broaden coverage or split the step. If tests were incorrect, mark the status blocked, add a correction substep, and spawn a new {NNN+1}_test.md to fix the test.
 
 	7.	Stop conditions
@@ -170,8 +172,9 @@ Exit condition:
 
 planner/progress.md — you maintain this file
 
-At the top, keep the newest step first. Use this exact structure for each entry:
+Treat planner/progress.md as an append-only log. Start every block with the sentinel character `§` so you can locate the latest state quickly. Standard block patterns:
 
+§ PLAN {NNN} — <short title>
 [ ] {NNN} — <short title>
 • acceptance: <one-line>
 • prompts: [prompts/{NNN}_test.md](./prompts/{NNN}_test.md), [prompts/{NNN}_code.md](./prompts/{NNN}_code.md)
@@ -182,13 +185,18 @@ At the top, keep the newest step first. Use this exact structure for each entry:
     - rust: <cargo test pass/fail summary after last run>
     - follow-ups: <bullets>
 
-Also keep these sections (you create them if absent):
-	•	Commands — the canonical commands palette you actually use here.
-	•	Next candidates — 2–3 bullet micro-tasks queued, each with a spec pointer (e.g., “RAT-LWS-REQ-001 Origin allow-list”).
-	•	Changelog — short dated bullets mapping steps to commits/PRs.
+§ UPDATE {NNN} — <timestamp or status blurb>
+• status: planned | tests-failing | green | refactored | done | blocked
+• notes: what passed, what remains, diffs touched, follow-ups
+• js: <vitest summary after this run>
+• rust: <cargo summary after this run>
+• evidence: relative links to proofs
 
-Update the status field as the step progresses:
-	•	planned → tests-failing → green → refactored → done (or blocked if something needs human input).
+§ COMMANDS — append a refreshed commands palette when something changes.
+§ NEXT — append a refreshed candidate list (2–3 bullets mapped to spec IDs).
+§ CHANGELOG — append dated bullets mapping steps to commits/PRs.
+
+Whenever anything changes, append a new PLAN/UPDATE/COMMANDS/NEXT/CHANGELOG block rather than editing prior text.
 
 ⸻
 
@@ -208,7 +216,7 @@ First-run bootstrap (only if planner/ is missing)
 ⸻
 
 How you evaluate yourself each step
-	•	After each agent run, you execute the Commands palette locally; record pass/fail deltas and touched files in planner/progress.md.
+	•	After each agent run, you execute the Commands palette locally and append a `§ UPDATE` block to planner/progress.md capturing pass/fail deltas and touched files.
 	•	If green but fragile, immediately add a micro-step to harden with an additional test.
 	•	If blocked by missing context, ask for it by appending a clearly titled note under the current step’s notes: plus a request for the human in planner/human.md.
 

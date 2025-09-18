@@ -16,12 +16,13 @@ Ground Rules (read carefully)
 	•	Read on every step:
 	•	planner/spec.md (read-only; never write to it).
 	•	planner/human.md (operator long-term guidance/hints).
-	•	planner/progress.md (you own this status file).
-	•	Maintain a single rolling checklist in planner/progress.md with:
-	•	Timestamped sections.
-	•	Numbered steps ([ ] checkboxes).
+	•	planner/progress.md (you own this status file; treat it as append-only—never edit or delete existing lines).
+	•	Every log section starts with the sentinel character `§` so you can quickly search for the latest entry.
+	•	Each appended section must include:
+	•	Timestamped headers.
+	•	Numbered steps ([ ] checkboxes) with a short “Why this now?” rationale.
 	•	Relative links to any artifacts you create (files, notes).
-	•	A short “Why this now?” rationale per step.
+	•	Status or checkbox updates are captured by appending new `§ UPDATE` sections rather than modifying prior content.
 	2.	Never write to: planner/spec.md.
 	3.	Ask before you act: For any potentially disruptive change (renames, deletes, dependency adds, toolchain changes), propose a dry-run plan and wait for explicit operator approval.
 	4.	Small diffs only: Prefer 1–3 files per step. Defer broad restructuring unless explicitly requested.
@@ -44,12 +45,13 @@ If instructions conflict, ask for clarification before proceeding.
 ⸻
 
 Output & File Layout You Maintain
-	•	planner/progress.md — single authoritative checklist with:
-	•	Section header: ## YYYY-MM-DD HH:mm — <short objective>
+	•	planner/progress.md — append-only log made of `§`-prefixed blocks (search for `§` to jump to the latest entry).
+	•	When planning, append a `§ PLAN YYYY-MM-DD HH:mm — <short objective>` block with:
 	•	Context: 2–4 lines summarizing intent.
 	•	Plan: Numbered micro-steps with [ ] checkboxes and relative links to artifacts.
 	•	Prompts/Notes: Links to any notes you wrote (below).
-	•	Status: BLOCKED / READY FOR REVIEW / APPLIED.
+	•	Status line describing BLOCKED / READY FOR REVIEW / APPLIED.
+	•	When progress changes, append a new `§ UPDATE` block that restates the relevant checkboxes and status instead of editing the plan block.
 	•	planner/notes/<step-id>.md — optional per-step note containing:
 	•	Commands you intend to run (and their dry-run outputs if any).
 	•	Risks, alternatives, and backout plan.
@@ -69,14 +71,14 @@ Working Style (tight operator feedback loop)
 	•	Exact commands you will run.
 	•	Acceptance evidence you will capture afterward.
 	•	Backout plan for each micro-step (how to undo).
-	•	Write the plan as a new section in planner/progress.md with unchecked boxes.
+	•	Append the plan as a new `§ PLAN` section at the end of planner/progress.md with unchecked boxes (do not rewrite earlier content).
 	•	Wait for operator APPROVE or ADJUST.
 	3.	Apply (once approved)
 	•	Execute the plan exactly:
 	•	Make minimal changes.
 	•	Keep diffs small and cohesive.
 	•	Update planner/notes/<step-id>.md with proofs (snippets of command output, file tree deltas).
-	•	In planner/progress.md, check the boxes you completed and set Status: APPLIED (or PARTIAL if you stopped early).
+	•	In planner/progress.md, append a `§ UPDATE` block that restates the plan with updated [x]/[ ] markers and the current status (APPLIED or PARTIAL); never edit earlier lines.
 	4.	Review & Next Step
 	•	Summarize what changed in 3–6 bullet points with relative links to the diffs/files.
 	•	Propose the next tiny step (one paragraph + bullets). Do not proceed until approved.
@@ -111,7 +113,7 @@ What to Produce Now (on first run)
 	2.	Emit:
 	•	A Repository Snapshot: top-level file map (depth 1–2), detected tools (names + versions), and any obvious gaps.
 	•	A One-sentence objective (from the operator’s instructions).
-	•	A Dry-Run Plan section in planner/progress.md with:
+	•	A `§ PLAN 001 — <objective>` section appended to planner/progress.md with:
 	•	Step id 001.
 	•	3–7 micro-steps (checkboxes, paths, commands, evidence, backout).
 	•	Links you will later fill in to planner/notes/001.md.
@@ -120,7 +122,7 @@ What to Produce Now (on first run)
 ⸻
 
 Update Discipline
-	•	Every time you complete part of a plan, update planner/progress.md immediately.
+	•	Every time you complete part of a plan, append a new `§ UPDATE` block to planner/progress.md immediately (no in-place edits).
 	•	Keep planner/notes/<step-id>.md short, scannable, and link-rich.
 	•	Never modify planner/spec.md.
 
