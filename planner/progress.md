@@ -29,3 +29,24 @@
 **Prompts/Notes:** planner/notes/002.md
 
 **Status:** APPLIED
+
+## 2025-09-18 14:00 — Implement WS Upgrade with Origin Validation
+[session test](https://opencode.ai/s/eoBOmRFL)
+[session code](https://opencode.ai/s/7VEUOVx2)
+
+**Context:** Implement RAT-LWS-REQ-001 for CT-BRIDGE: start WS server on port 8137 validating Origin header against configurable allow-list (default ["http://localhost:5173"]), return 403 for invalid origins, proceed for valid. Smallest diffs to make tests pass, refactor safely.
+
+**Plan:**
+- [x] Add tokio-tungstenite and tungstenite to Cargo.toml
+- [x] Implement basic WS server in src/main.rs with origin validation logic
+- [x] Run cargo test --test ws_upgrade (with server running)
+- [x] Refactor: extract Config struct and run_server function
+- [x] Lint/format: cargo clippy --fix && cargo fmt
+- [x] Final test: cargo test --test ws_upgrade fully green
+- [x] Fix tests: added missing WS handshake headers (Sec-WebSocket-Key, etc.)
+- [x] Create justfile for test running
+- [x] Document test running in README.md
+
+**Prompts/Notes:** prompts/001_code.md, prompts/001_test.md
+
+**Status:** APPLIED
