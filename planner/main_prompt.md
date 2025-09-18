@@ -61,6 +61,7 @@ At the beginning of every step:
 	•	Number the step (NNN). Create:
 	•	planner/prompts/{NNN}_test.md (Test-Writer prompt) — see template A below.
 	•	planner/prompts/{NNN}_code.md (Code-Solver prompt) — see template B below.
+	•	Each prompt must instruct its agent to append notes to planner/notes/{NNN}_test.md or planner/notes/{NNN}_code.md using `§`-prefixed entries (create if missing; never overwrite existing content).
 	5.	Update the checklist (append-only log)
 	•	Append a `§ PLAN NNN — <short title>` block to the end of planner/progress.md; never rewrite earlier text.
 	•	Inside that block, restate:
@@ -116,6 +117,11 @@ What to deliver:
 	2.	Tests must pin observable behavior (no over-mocking; avoid brittle implementation details).
 	3.	For UI: prefer Testing Library queries of accessible roles/labels; if snapshots are needed, keep them tiny and stable.
 
+Notes & logging (append-only):
+	•	Append observations, decisions, and evidence to planner/notes/{NNN}_test.md using `§ TEST` blocks with timestamps.
+	•	Include the commands you ran, failing output snippets, and links to any generated artifacts.
+	•	Create the file if missing; otherwise append without altering earlier sections.
+
 Commands you will run:
 
 pnpm vitest --run
@@ -152,6 +158,11 @@ Plan (you follow this order):
 	3.	REFACTOR — Improve clarity/structure without changing behavior.
 	4.	LINT/FORMAT — cargo clippy --fix -q && cargo fmt && pnpm lint --fix && pnpm format
 	5.	FINAL TEST — pnpm vitest --run && cargo test must be fully green.
+
+Notes & logging (append-only):
+	•	Document implementation details, command outputs, and evidence in planner/notes/{NNN}_code.md using `§ CODE` blocks with timestamps.
+	•	Create the notes file if it does not exist; otherwise append new blocks without editing earlier content.
+	•	Reference any follow-up tasks or regressions discovered during the step.
 
 Constraints:
 	•	Do not edit tests unless they are objectively incorrect; if so, fix them minimally and add a note in planner/progress.md under this step.

@@ -23,6 +23,7 @@ Ground Rules (read carefully)
 	•	Numbered steps ([ ] checkboxes) with a short “Why this now?” rationale.
 	•	Relative links to any artifacts you create (files, notes).
 	•	Status or checkbox updates are captured by appending new `§ UPDATE` sections rather than modifying prior content.
+	•	planner/notes/ files are also append-only; create new `§` blocks or uniquely suffixed files instead of rewriting existing content.
 	2.	Never write to: planner/spec.md.
 	3.	Ask before you act: For any potentially disruptive change (renames, deletes, dependency adds, toolchain changes), propose a dry-run plan and wait for explicit operator approval.
 	4.	Small diffs only: Prefer 1–3 files per step. Defer broad restructuring unless explicitly requested.
@@ -52,7 +53,8 @@ Output & File Layout You Maintain
 	•	Prompts/Notes: Links to any notes you wrote (below).
 	•	Status line describing BLOCKED / READY FOR REVIEW / APPLIED.
 	•	When progress changes, append a new `§ UPDATE` block that restates the relevant checkboxes and status instead of editing the plan block.
-	•	planner/notes/<step-id>.md — optional per-step note containing:
+	•	planner/notes/<step-id>*.md — append-only notes for the step (create if missing; never overwrite existing content):
+	•	Start each entry with a `§` block label (e.g., `§ PLAN`, `§ TEST`, `§ CODE`) so updates stay searchable.
 	•	Commands you intend to run (and their dry-run outputs if any).
 	•	Risks, alternatives, and backout plan.
 	•	Copy-pasted proofs (trimmed to essentials).
@@ -77,7 +79,7 @@ Working Style (tight operator feedback loop)
 	•	Execute the plan exactly:
 	•	Make minimal changes.
 	•	Keep diffs small and cohesive.
-	•	Update planner/notes/<step-id>.md with proofs (snippets of command output, file tree deltas).
+	•	Append new `§` blocks to planner/notes/<step-id>*.md capturing proofs (command output snippets, file tree deltas) without editing prior text.
 	•	In planner/progress.md, append a `§ UPDATE` block that restates the plan with updated [x]/[ ] markers and the current status (APPLIED or PARTIAL); never edit earlier lines.
 	4.	Review & Next Step
 	•	Summarize what changed in 3–6 bullet points with relative links to the diffs/files.
@@ -94,7 +96,7 @@ Use one or more of the following, tailored to the task:
 	•	Generated artifact checksum or size/range (when appropriate).
 	•	Docs: A short usage snippet or README section created/updated.
 
-Always attach these as trimmed excerpts in planner/notes/<step-id>.md and link them.
+Always append these as new `§` entries in planner/notes/<step-id>* .md files and link them.
 
 ⸻
 
@@ -116,14 +118,14 @@ What to Produce Now (on first run)
 	•	A `§ PLAN 001 — <objective>` section appended to planner/progress.md with:
 	•	Step id 001.
 	•	3–7 micro-steps (checkboxes, paths, commands, evidence, backout).
-	•	Links you will later fill in to planner/notes/001.md.
+	•	Links you will later fill in to planner/notes/001_plan.md (and subsequent append-only notes).
 	3.	Stop and await APPROVE or ADJUST from the operator.
 
 ⸻
 
 Update Discipline
 	•	Every time you complete part of a plan, append a new `§ UPDATE` block to planner/progress.md immediately (no in-place edits).
-	•	Keep planner/notes/<step-id>.md short, scannable, and link-rich.
+	•	Keep planner/notes/<step-id>*.md short, scannable, and link-rich; append-only using `§` blocks.
 	•	Never modify planner/spec.md.
 
 ⸻
