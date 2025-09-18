@@ -1961,7 +1961,11 @@ async fn fs_write_text_file_caches_allow_always_permission() {
 
     // Verify permission was requested once
     let permission_calls = agent.take_permission_calls().await;
-    assert_eq!(permission_calls.len(), 1, "should request permission once for first write");
+    assert_eq!(
+        permission_calls.len(),
+        1,
+        "should request permission once for first write"
+    );
 
     // Second write to same path - should skip permission request due to caching
     send_json_rpc(
@@ -1988,7 +1992,11 @@ async fn fs_write_text_file_caches_allow_always_permission() {
 
     // Verify NO additional permission requests were made
     let permission_calls = agent.take_permission_calls().await;
-    assert_eq!(permission_calls.len(), 0, "should not request permission for cached allow_always");
+    assert_eq!(
+        permission_calls.len(),
+        0,
+        "should not request permission for cached allow_always"
+    );
 
     harness.shutdown().await;
 }
@@ -2052,7 +2060,11 @@ async fn fs_write_text_file_caches_reject_always_permission() {
 
     // Verify permission was requested once
     let permission_calls = agent.take_permission_calls().await;
-    assert_eq!(permission_calls.len(), 1, "should request permission once for first rejection");
+    assert_eq!(
+        permission_calls.len(),
+        1,
+        "should request permission once for first rejection"
+    );
 
     // Second write attempt to same path - should fail immediately without contacting agent
     send_json_rpc(
@@ -2079,7 +2091,11 @@ async fn fs_write_text_file_caches_reject_always_permission() {
 
     // Verify NO additional permission requests were made
     let permission_calls = agent.take_permission_calls().await;
-    assert_eq!(permission_calls.len(), 0, "should not request permission for cached reject_always");
+    assert_eq!(
+        permission_calls.len(),
+        0,
+        "should not request permission for cached reject_always"
+    );
 
     harness.shutdown().await;
 }
@@ -2143,7 +2159,11 @@ async fn bridge_handshake_caches_allow_always_permission_decisions() {
 
     // Verify permission was requested once
     let permission_calls = agent.take_permission_calls().await;
-    assert_eq!(permission_calls.len(), 1, "should request permission once for first write");
+    assert_eq!(
+        permission_calls.len(),
+        1,
+        "should request permission once for first write"
+    );
 
     // Second write to same canonical path - should skip permission request and succeed
     send_json_rpc(
@@ -2170,7 +2190,11 @@ async fn bridge_handshake_caches_allow_always_permission_decisions() {
 
     // Verify NO additional permission requests were made
     let permission_calls = agent.take_permission_calls().await;
-    assert_eq!(permission_calls.len(), 0, "should not request permission for cached allow_always decision");
+    assert_eq!(
+        permission_calls.len(),
+        0,
+        "should not request permission for cached allow_always decision"
+    );
 
     harness.shutdown().await;
 }
@@ -2234,7 +2258,11 @@ async fn bridge_handshake_caches_reject_always_permission_decisions() {
 
     // Verify permission was requested once
     let permission_calls = agent.take_permission_calls().await;
-    assert_eq!(permission_calls.len(), 1, "should request permission once for first rejection");
+    assert_eq!(
+        permission_calls.len(),
+        1,
+        "should request permission once for first rejection"
+    );
 
     // Second write attempt to same canonical path - should fail immediately without contacting agent
     send_json_rpc(
@@ -2255,13 +2283,17 @@ async fn bridge_handshake_caches_reject_always_permission_decisions() {
     let message = next_message(&mut ws).await;
     let payload = parse_json(&message);
     assert_eq!(payload.get("id"), Some(&json!("cache-reject-2")));
-    let _error = payload
-        .get("error")
-        .expect("second write to same canonical path should fail immediately without contacting agent");
+    let _error = payload.get("error").expect(
+        "second write to same canonical path should fail immediately without contacting agent",
+    );
 
     // Verify NO additional permission requests were made
     let permission_calls = agent.take_permission_calls().await;
-    assert_eq!(permission_calls.len(), 0, "should not request permission for cached reject_always decision");
+    assert_eq!(
+        permission_calls.len(),
+        0,
+        "should not request permission for cached reject_always decision"
+    );
 
     harness.shutdown().await;
 }
@@ -2325,7 +2357,11 @@ async fn bridge_handshake_requests_permission_when_no_policy_exists() {
 
     // Verify permission was requested for the new path
     let permission_calls = agent.take_permission_calls().await;
-    assert_eq!(permission_calls.len(), 1, "should request permission when no policy entry exists");
+    assert_eq!(
+        permission_calls.len(),
+        1,
+        "should request permission when no policy entry exists"
+    );
 
     harness.shutdown().await;
 }

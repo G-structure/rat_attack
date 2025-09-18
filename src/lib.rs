@@ -1,5 +1,5 @@
-use std::future::Future;
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -811,9 +811,8 @@ async fn handle_write_text_file(
     match cached_decision {
         Some(PermissionDecision::AllowAlways) => {
             // Cached allow_always - proceed with write without requesting permission
-            fs::write(&canonical_path, content).map_err(|_| {
-                acp::Error::internal_error().with_data("failed to write file")
-            })?;
+            fs::write(&canonical_path, content)
+                .map_err(|_| acp::Error::internal_error().with_data("failed to write file"))?;
             return Ok(());
         }
         Some(PermissionDecision::RejectAlways) => {
