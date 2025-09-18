@@ -839,3 +839,265 @@ fn parse_json(message: &Message) -> Value {
         other => panic!("expected text/binary frame, got {other:?}"),
     }
 }
+
+// Tests for fs/read_text_file capability per RAT-LWS-REQ-040
+// These tests will fail until fs/read_text_file is implemented
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_read_text_file_basic_functionality() {
+    let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize first
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+
+    // Test basic fs/read_text_file request
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "read-1",
+            "method": "fs/read_text_file",
+            "params": {
+                "path": "/project/test.txt"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("read-1")));
+
+    // This test should fail until fs/read_text_file is implemented
+    let result = payload.get("result").expect("fs/read_text_file should return success result when implemented");
+    assert!(result.get("content").is_some(), "result should contain file content");
+    assert!(result.get("content").unwrap().is_string(), "content should be a string");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_read_text_file_with_line_offset_and_limit() {
+    let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize first
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+
+    // Test fs/read_text_file with line offset and limit per RAT-LWS-REQ-040
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "read-offset-1",
+            "method": "fs/read_text_file",
+            "params": {
+                "path": "/project/test.txt",
+                "line_offset": 5,
+                "line_limit": 10
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("read-offset-1")));
+
+    // This test should fail until fs/read_text_file is implemented
+    let result = payload.get("result").expect("fs/read_text_file should return success result when implemented");
+    assert!(result.get("content").is_some(), "result should contain limited file content");
+    // Should also verify that only the requested lines are returned
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_read_text_file_enforces_project_root_sandbox() {
+    let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize first
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+
+    // Test reading file outside project root - should be rejected per RAT-LWS-REQ-044
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "read-oob-1",
+            "method": "fs/read_text_file",
+            "params": {
+                "path": "/etc/passwd"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("read-oob-1")));
+
+    // This should return an error for out-of-bounds access (not method not found)
+    let error = payload.get("error").expect("should have error for out-of-bounds access");
+    let error_code = error.get("code").and_then(|c| c.as_i64()).expect("error should have numeric code");
+    // Should be permission denied (e.g., -32000) or similar, not method not found (-32601)
+    assert_ne!(error_code, -32601, "should be permission error, not method not found");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_read_text_file_rejects_missing_files() {
+    let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize first
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+
+    // Test reading non-existent file
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "read-missing-1",
+            "method": "fs/read_text_file",
+            "params": {
+                "path": "/project/nonexistent.txt"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("read-missing-1")));
+
+    // This should return an error for missing file (not method not found)
+    let error = payload.get("error").expect("should have error for missing file");
+    let error_code = error.get("code").and_then(|c| c.as_i64()).expect("error should have numeric code");
+    // Should be file not found error, not method not found (-32601)
+    assert_ne!(error_code, -32601, "should be file not found error, not method not found");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_read_text_file_rejects_binary_files() {
+    let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize first
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+
+    // Test reading binary file - should be rejected per RAT-LWS-REQ-111
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "read-binary-1",
+            "method": "fs/read_text_file",
+            "params": {
+                "path": "/project/binary.bin"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("read-binary-1")));
+
+    // This should return an error for binary file (not method not found)
+    let error = payload.get("error").expect("should have error for binary file");
+    let error_code = error.get("code").and_then(|c| c.as_i64()).expect("error should have numeric code");
+    // Should be binary file error, not method not found (-32601)
+    assert_ne!(error_code, -32601, "should be binary file error, not method not found");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_read_text_file_handles_out_of_bounds_line_parameters() {
+    let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize first
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+
+    // Test reading with out-of-bounds line offset
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "read-oob-lines-1",
+            "method": "fs/read_text_file",
+            "params": {
+                "path": "/project/test.txt",
+                "line_offset": 1000000,
+                "line_limit": 10
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("read-oob-lines-1")));
+
+    // This should handle gracefully - either return empty content or appropriate error
+    if let Some(result) = payload.get("result") {
+        // Should return empty content or indicate no lines available
+        assert!(result.get("content").is_some(), "result should contain content field");
+    } else {
+        // Should handle out-of-bounds appropriately, not return method not found
+        let error = payload.get("error").expect("should have error for out-of-bounds parameters");
+        let error_code = error.get("code").and_then(|c| c.as_i64()).expect("error should have numeric code");
+        assert_ne!(error_code, -32601, "should handle out-of-bounds error, not method not found");
+    }
+
+    harness.shutdown().await;
+}
