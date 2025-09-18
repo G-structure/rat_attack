@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -25,6 +26,14 @@ pub struct BridgeConfig {
     pub expected_subprotocol: String,
     pub bridge_id: String,
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PermissionDecision {
+    AllowAlways,
+    RejectAlways,
+}
+
+pub type PermissionCache = Arc<TokioMutex<HashMap<String, PermissionDecision>>>;
 
 #[derive(Debug)]
 pub enum BridgeError {
@@ -187,6 +196,7 @@ pub fn serve(
             allowed_origins,
             expected_subprotocol,
             bridge_id,
+            permission_cache: Arc::new(TokioMutex::new(HashMap::new())),
         });
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -206,6 +216,7 @@ struct BridgeSharedConfig {
     allowed_origins: Vec<String>,
     expected_subprotocol: String,
     bridge_id: String,
+    permission_cache: PermissionCache,
 }
 
 fn spawn_accept_loop(
@@ -772,7 +783,7 @@ fn apply_line_filter(
 // TODO: Refactor permission handling into a generic monadic abstraction so it can be more generally applied to different tools.
 async fn handle_write_text_file(
     _stream: Arc<TokioMutex<WebSocketStream<TcpStream>>>,
-    _shared: &BridgeSharedConfig,
+    shared: &BridgeSharedConfig,
     transport: &Arc<dyn AgentTransport>,
     session_id: &str,
     path: &str,
@@ -782,6 +793,7 @@ async fn handle_write_text_file(
 
     // First, check sandboxing
     let canonical_path = validate_and_resolve_path(path, true)?;
+    let canonical_path_str = canonical_path.to_string_lossy().to_string();
 
     // Create parent directories if they don't exist
     if let Some(parent) = canonical_path.parent() {
@@ -790,7 +802,30 @@ async fn handle_write_text_file(
         })?;
     }
 
-    // Now request permission from the agent
+    // Check permission cache first
+    let cached_decision = {
+        let cache = shared.permission_cache.lock().await;
+        cache.get(&canonical_path_str).cloned()
+    };
+
+    match cached_decision {
+        Some(PermissionDecision::AllowAlways) => {
+            // Cached allow_always - proceed with write without requesting permission
+            fs::write(&canonical_path, content).map_err(|_| {
+                acp::Error::internal_error().with_data("failed to write file")
+            })?;
+            return Ok(());
+        }
+        Some(PermissionDecision::RejectAlways) => {
+            // Cached reject_always - return error immediately
+            return Err(acp::Error::new((-32000, "Permission denied".to_string())));
+        }
+        None => {
+            // No cached decision - request permission from agent
+        }
+    }
+
+    // Request permission from the agent
     let permission_request = acp::RequestPermissionRequest {
         session_id: acp::SessionId(session_id.to_string().into()),
         tool_call: acp::ToolCallUpdate {
@@ -837,19 +872,38 @@ async fn handle_write_text_file(
         .await
         .map_err(|_| acp::Error::internal_error().with_data("permission request failed"))?;
 
-    // Check the permission outcome
+    // Check the permission outcome and update cache
     match permission_response.outcome {
         acp::RequestPermissionOutcome::Selected { option_id } => {
             match option_id.0.as_ref() {
-                "allow_once" | "allow_always" => {
-                    // Permission granted, proceed with write
+                "allow_once" => {
+                    // Permission granted for this write only, proceed with write
                     fs::write(&canonical_path, content).map_err(|_| {
                         acp::Error::internal_error().with_data("failed to write file")
                     })?;
                     Ok(())
                 }
-                "reject_once" | "reject_always" => {
-                    // Permission denied
+                "allow_always" => {
+                    // Permission granted always, cache the decision and proceed with write
+                    {
+                        let mut cache = shared.permission_cache.lock().await;
+                        cache.insert(canonical_path_str, PermissionDecision::AllowAlways);
+                    }
+                    fs::write(&canonical_path, content).map_err(|_| {
+                        acp::Error::internal_error().with_data("failed to write file")
+                    })?;
+                    Ok(())
+                }
+                "reject_once" => {
+                    // Permission denied for this write only
+                    Err(acp::Error::new((-32000, "Permission denied".to_string())))
+                }
+                "reject_always" => {
+                    // Permission denied always, cache the decision
+                    {
+                        let mut cache = shared.permission_cache.lock().await;
+                        cache.insert(canonical_path_str, PermissionDecision::RejectAlways);
+                    }
                     Err(acp::Error::new((-32000, "Permission denied".to_string())))
                 }
                 _ => {

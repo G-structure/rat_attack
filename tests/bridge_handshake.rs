@@ -1901,3 +1901,431 @@ async fn fs_write_text_file_validates_permission_before_execution() {
 
     harness.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_write_text_file_caches_allow_always_permission() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to provide allow_always permission on first request
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected {
+                option_id: acp::PermissionOptionId("allow_always".into()),
+            },
+            meta: None,
+        })
+        .await;
+
+    // First write to establish allow_always policy
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-cache-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "test_cache.txt",
+                "content": "First write with allow_always"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+    assert_eq!(payload.get("id"), Some(&json!("write-cache-1")));
+    let _result = payload
+        .get("result")
+        .expect("first write should succeed with allow_always");
+
+    // Verify permission was requested once
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 1, "should request permission once for first write");
+
+    // Second write to same path - should skip permission request due to caching
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-cache-2",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "test_cache.txt",
+                "content": "Second write should skip permission"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+    assert_eq!(payload.get("id"), Some(&json!("write-cache-2")));
+    let _result = payload
+        .get("result")
+        .expect("second write should succeed without permission request");
+
+    // Verify NO additional permission requests were made
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 0, "should not request permission for cached allow_always");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fs_write_text_file_caches_reject_always_permission() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to provide reject_always permission on first request
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected {
+                option_id: acp::PermissionOptionId("reject_always".into()),
+            },
+            meta: None,
+        })
+        .await;
+
+    // First write attempt - should be rejected and establish reject_always policy
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-reject-cache-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "test_reject_cache.txt",
+                "content": "First write attempt with reject_always"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+    assert_eq!(payload.get("id"), Some(&json!("write-reject-cache-1")));
+    let _error = payload
+        .get("error")
+        .expect("first write should be rejected with reject_always");
+
+    // Verify permission was requested once
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 1, "should request permission once for first rejection");
+
+    // Second write attempt to same path - should fail immediately without contacting agent
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "write-reject-cache-2",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "test_reject_cache.txt",
+                "content": "Second write should fail immediately"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+    assert_eq!(payload.get("id"), Some(&json!("write-reject-cache-2")));
+    let _error = payload
+        .get("error")
+        .expect("second write should fail immediately due to cached reject_always");
+
+    // Verify NO additional permission requests were made
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 0, "should not request permission for cached reject_always");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_handshake_caches_allow_always_permission_decisions() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to provide allow_always permission on first request
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected {
+                option_id: acp::PermissionOptionId("allow_always".into()),
+            },
+            meta: None,
+        })
+        .await;
+
+    // First write to establish allow_always policy for canonical path
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "cache-allow-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "cache_allow_test.txt",
+                "content": "First write establishing allow_always policy"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+    assert_eq!(payload.get("id"), Some(&json!("cache-allow-1")));
+    let _result = payload
+        .get("result")
+        .expect("first write should succeed with allow_always");
+
+    // Verify permission was requested once
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 1, "should request permission once for first write");
+
+    // Second write to same canonical path - should skip permission request and succeed
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "cache-allow-2",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "cache_allow_test.txt",
+                "content": "Second write should skip permission request"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+    assert_eq!(payload.get("id"), Some(&json!("cache-allow-2")));
+    let _result = payload
+        .get("result")
+        .expect("second write to same canonical path should succeed without permission request");
+
+    // Verify NO additional permission requests were made
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 0, "should not request permission for cached allow_always decision");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_handshake_caches_reject_always_permission_decisions() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to provide reject_always permission on first request
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected {
+                option_id: acp::PermissionOptionId("reject_always".into()),
+            },
+            meta: None,
+        })
+        .await;
+
+    // First write attempt - should be rejected and establish reject_always policy
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "cache-reject-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "cache_reject_test.txt",
+                "content": "First write attempt establishing reject_always policy"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+    assert_eq!(payload.get("id"), Some(&json!("cache-reject-1")));
+    let _error = payload
+        .get("error")
+        .expect("first write should be rejected with reject_always");
+
+    // Verify permission was requested once
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 1, "should request permission once for first rejection");
+
+    // Second write attempt to same canonical path - should fail immediately without contacting agent
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "cache-reject-2",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "cache_reject_test.txt",
+                "content": "Second write should fail immediately due to cached reject_always"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+    assert_eq!(payload.get("id"), Some(&json!("cache-reject-2")));
+    let _error = payload
+        .get("error")
+        .expect("second write to same canonical path should fail immediately without contacting agent");
+
+    // Verify NO additional permission requests were made
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 0, "should not request permission for cached reject_always decision");
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_handshake_requests_permission_when_no_policy_exists() {
+    let agent = Arc::new(FakePermissionAgentTransport::new(
+        success_initialize_response(),
+    ));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    // Initialize and create session
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+    send_session_new_request(&mut ws).await;
+    let session_response = next_message(&mut ws).await;
+    let session_payload = parse_json(&session_response);
+    let session_id = session_payload
+        .get("result")
+        .and_then(|r| r.get("sessionId"))
+        .and_then(|s| s.as_str())
+        .expect("should have sessionId");
+
+    // Configure agent to provide allow_once permission
+    agent
+        .configure_permission_response(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Selected {
+                option_id: acp::PermissionOptionId("allow_once".into()),
+            },
+            meta: None,
+        })
+        .await;
+
+    // First write to a new path - should request permission since no policy exists
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "no-policy-1",
+            "method": "fs/write_text_file",
+            "params": {
+                "sessionId": session_id,
+                "path": "no_policy_test.txt",
+                "content": "First write to new path should request permission"
+            }
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+    assert_eq!(payload.get("id"), Some(&json!("no-policy-1")));
+    let _result = payload
+        .get("result")
+        .expect("write should succeed after permission approval");
+
+    // Verify permission was requested for the new path
+    let permission_calls = agent.take_permission_calls().await;
+    assert_eq!(permission_calls.len(), 1, "should request permission when no policy entry exists");
+
+    harness.shutdown().await;
+}

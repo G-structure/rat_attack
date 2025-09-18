@@ -104,11 +104,11 @@
     - implement fs/write_text_file with permission gating per RAT-LWS-REQ-041
     - add permission policy scaffolding per RAT-LWS-REQ-092
 
-§ PLAN 007 — fs/write_text_file with permission gating
-[ ] 007 — fs/write_text_file with permission gating
+## PLAN 007 — fs/write_text_file with permission gating
+[x] 007 — fs/write_text_file with permission gating
 • acceptance: Bridge implements `fs/write_text_file` method that requires permission approval via `session/request_permission` with PR sandboxing and support for all permission outcomes
 • prompts: [prompts/007_test.md](./prompts/007_test.md), [prompts/007_code.md](./prompts/007_code.md)
-• status: planned
+• status: applied
 • notes:
     - context: src/lib.rs for fs/write_text_file method, tests/bridge_handshake.rs for permission gating tests
     - js: not-run
@@ -117,3 +117,31 @@
 • next:
     - implement terminal capability handling per RAT-LWS-REQ-060/062/063
     - add permission policy scaffolding per RAT-LWS-REQ-092
+
+## PLAN 008 — fs/write_text_file permission caching
+[x] 008 — fs/write_text_file permission caching
+• acceptance: cache allow_always/reject_always decisions per canonical path while defaulting to permission prompts
+• prompts: [prompts/008_test.md](./prompts/008_test.md), [prompts/008_code.md](./prompts/008_code.md)
+• status: applied
+• notes:
+    - context: src/lib.rs, tests/bridge_handshake.rs (permission policy registry)
+    - js: not-run
+    - rust: pass (`cargo test`)
+    - follow-ups: bring policy persistence + generalize beyond fs writes
+• next:
+    - build policy persistence across sessions per RAT-LWS-REQ-092
+    - implement terminal permission gating with approvals per RAT-LWS-REQ-062/063
+
+§ PLAN 009 — auth/cli_login Claude login CLI
+[ ] 009 — auth/cli_login Claude login CLI
+• acceptance: auth/cli_login resolves claude CLI and starts `/login` command immediately returning structured status
+• prompts: [prompts/009_test.md](./prompts/009_test.md), [prompts/009_code.md](./prompts/009_code.md)
+• status: planned
+• notes:
+    - context: src/lib.rs, potentially new src/login.rs, tests/bridge_login.rs; ct-web/package.json for npm integration
+    - js: not-run
+    - rust: pass (`cargo test`)
+    - follow-ups: record login process status events, expose progress notifications to UI, persist policy registry
+• next:
+    - extend login flow to surface progress updates and capture stderr for UI (RAT-LWS-REQ-094)
+    - wire multi-agent launcher registry with cached credentials
