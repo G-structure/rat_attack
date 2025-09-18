@@ -769,6 +769,7 @@ fn apply_line_filter(
     }
 }
 
+// TODO: Refactor permission handling into a generic monadic abstraction so it can be more generally applied to different tools.
 async fn handle_write_text_file(
     _stream: Arc<TokioMutex<WebSocketStream<TcpStream>>>,
     _shared: &BridgeSharedConfig,
