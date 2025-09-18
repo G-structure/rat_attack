@@ -24,22 +24,55 @@ impl Default for Config {
     }
 }
 
+fn has_valid_fs_capabilities(params: Option<&Value>) -> bool {
+    let capabilities = params.and_then(|p| p.get("capabilities"));
+    let fs_caps = capabilities.and_then(|c| c.get("fs"));
+    let read_cap = fs_caps
+        .and_then(|fs| fs.get("readTextFile"))
+        .and_then(|v| v.as_bool());
+    let write_cap = fs_caps
+        .and_then(|fs| fs.get("writeTextFile"))
+        .and_then(|v| v.as_bool());
+
+    read_cap == Some(true) && write_cap == Some(true)
+}
+
 fn handle_jsonrpc_request(request: &Value, bridge_id: &str) -> Option<Value> {
     let method = request.get("method")?.as_str()?;
     let id = request.get("id")?;
 
     match method {
         "initialize" => {
-            let response = json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "_meta": {
-                        "bridgeId": bridge_id
+            let params = request.get("params");
+
+            if has_valid_fs_capabilities(params) {
+                let response = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "_meta": {
+                            "bridgeId": bridge_id
+                        },
+                        "capabilities": {
+                            "fs": {
+                                "readTextFile": true,
+                                "writeTextFile": true
+                            }
+                        }
                     }
-                }
-            });
-            Some(response)
+                });
+                Some(response)
+            } else {
+                let error_response = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32602,
+                        "message": "Missing required fs capabilities: readTextFile and writeTextFile must both be true"
+                    }
+                });
+                Some(error_response)
+            }
         }
         _ => None, // Unknown method, no response
     }
