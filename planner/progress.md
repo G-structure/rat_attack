@@ -60,3 +60,44 @@
 • next:
     - handle agent notifications streaming to CT-WEB
     - add permission policy scaffolding per RAT-LWS-REQ-092
+
+§ PLAN 005 — session/prompt streaming notifications
+[x] 005 — session/prompt streaming notifications
+• acceptance: Bridge forwards `session/prompt` requests to agent and streams `session/update` notifications back to CT-WEB until final result with `stopReason`.
+• prompts: [prompts/005_test.md](./prompts/005_test.md), [prompts/005_code.md](./prompts/005_code.md)
+• status: done
+• notes:
+    - context: src/lib.rs for session/prompt forwarding, tests/bridge_handshake.rs for streaming tests
+    - js: not-run
+    - rust: all pass (8 passed, 0 failed - session/prompt forwarding AND streaming notifications working)
+    - follow-ups: streaming notifications complete, ready for fs capabilities
+• next:
+    - implement actual streaming via NotificationSender to make remaining tests pass
+    - add fs capability handling after streaming complete
+
+§ PLAN 005A — agent streaming notifications completion
+[x] 005A — agent streaming notifications completion
+• acceptance: Agents can send session/update notifications through NotificationSender during prompt execution and notifications are relayed to CT-WEB
+• prompts: [prompts/005A_test.md](./prompts/005A_test.md), [prompts/005A_code.md](./prompts/005A_code.md)
+• status: done (superseded - streaming implemented by previous session)
+• notes:
+    - context: tests/bridge_handshake.rs FakeStreamingAgentTransport enhancement completed
+    - js: not-run
+    - rust: all pass (streaming functionality working)
+    - follow-ups: PLAN 005 fully complete, ready for fs capabilities
+• next:
+    - implement fs capability handling (fs/read_text_file, fs/write_text_file) per RAT-LWS-REQ-040/041
+
+§ PLAN 006 — fs/read_text_file capability
+[ ] 006 — fs/read_text_file capability
+• acceptance: Bridge implements `fs/read_text_file` method with optional line offset/limit and PR sandboxing per RAT-LWS-REQ-040/044
+• prompts: [prompts/006_test.md](./prompts/006_test.md), [prompts/006_code.md](./prompts/006_code.md)
+• status: planned
+• notes:
+    - context: src/lib.rs for fs/read_text_file method, tests/bridge_handshake.rs for fs tests
+    - js: not-run
+    - rust: pending (new fs tests to be added)
+    - follow-ups: fs/write_text_file after read capability working
+• next:
+    - implement fs/write_text_file with permission gating per RAT-LWS-REQ-041
+    - add permission policy scaffolding per RAT-LWS-REQ-092

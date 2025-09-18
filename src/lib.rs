@@ -7,7 +7,7 @@ use agent_client_protocol as acp;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Map, Value};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request, Response as HandshakeResponse,
@@ -101,6 +101,48 @@ impl BridgeHandle {
     }
 }
 
+pub trait NotificationSender: Send + Sync {
+    fn send_notification(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AgentTransportError>> + Send>>;
+}
+
+struct WebSocketNotificationSender {
+    stream: Arc<TokioMutex<WebSocketStream<TcpStream>>>,
+}
+
+impl WebSocketNotificationSender {
+    fn new(stream: Arc<TokioMutex<WebSocketStream<TcpStream>>>) -> Self {
+        Self { stream }
+    }
+}
+
+impl NotificationSender for WebSocketNotificationSender {
+    fn send_notification(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AgentTransportError>> + Send>> {
+        let stream = self.stream.clone();
+        let method = method.to_string();
+        Box::pin(async move {
+            let payload = json!({
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            });
+
+            let mut guard = stream.lock().await;
+            send_json(&mut *guard, payload)
+                .await
+                .map_err(|_| AgentTransportError::Internal("Failed to send notification".to_string()))?;
+            Ok(())
+        })
+    }
+}
+
 pub trait AgentTransport: Send + Sync + 'static {
     fn initialize(
         &self,
@@ -110,6 +152,11 @@ pub trait AgentTransport: Send + Sync + 'static {
         &self,
         request: acp::NewSessionRequest,
     ) -> Pin<Box<dyn Future<Output = Result<acp::NewSessionResponse, AgentTransportError>> + Send>>;
+    fn prompt(
+        &self,
+        request: acp::PromptRequest,
+        notification_sender: Arc<dyn NotificationSender>,
+    ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>>;
 }
 
 pub fn serve(
@@ -280,42 +327,52 @@ fn handshake_error(status: StatusCode, message: &str) -> ErrorResponse {
 }
 
 async fn handle_websocket(
-    mut stream: WebSocketStream<TcpStream>,
+    stream: WebSocketStream<TcpStream>,
     shared: Arc<BridgeSharedConfig>,
     transport: Arc<dyn AgentTransport>,
 ) -> Result<(), tungstenite::Error> {
+    let stream = Arc::new(TokioMutex::new(stream));
     let mut initialized = false;
 
-    while let Some(message) = stream.next().await {
-        match message? {
-            Message::Text(text) => {
+    loop {
+        let message = {
+            let mut stream_guard = stream.lock().await;
+            stream_guard.next().await
+        };
+
+        match message {
+            Some(Ok(Message::Text(text))) => {
                 let value: Value = match serde_json::from_str(&text) {
                     Ok(value) => value,
                     Err(_) => {
-                        send_error(&mut stream, Value::Null, acp::Error::parse_error()).await?;
+                        let mut stream_guard = stream.lock().await;
+                        send_error(&mut *stream_guard, Value::Null, acp::Error::parse_error()).await?;
                         continue;
                     }
                 };
-                process_request(&mut stream, &shared, &transport, &mut initialized, value).await?;
+                process_request(stream.clone(), &shared, &transport, &mut initialized, value).await?;
             }
-            Message::Binary(bytes) => {
+            Some(Ok(Message::Binary(bytes))) => {
                 let value: Value = match serde_json::from_slice(&bytes) {
                     Ok(value) => value,
                     Err(_) => {
-                        send_error(&mut stream, Value::Null, acp::Error::parse_error()).await?;
+                        let mut stream_guard = stream.lock().await;
+                        send_error(&mut *stream_guard, Value::Null, acp::Error::parse_error()).await?;
                         continue;
                     }
                 };
-                process_request(&mut stream, &shared, &transport, &mut initialized, value).await?;
+                process_request(stream.clone(), &shared, &transport, &mut initialized, value).await?;
             }
-            Message::Ping(payload) => {
-                stream.send(Message::Pong(payload)).await?;
+            Some(Ok(Message::Ping(payload))) => {
+                let mut stream_guard = stream.lock().await;
+                stream_guard.send(Message::Pong(payload)).await?;
             }
-            Message::Pong(_) => {}
-            Message::Close(_) => {
+            Some(Ok(Message::Pong(_))) => {}
+            Some(Ok(Message::Close(_))) | None => {
                 break;
             }
-            Message::Frame(_) => {}
+            Some(Ok(Message::Frame(_))) => {}
+            Some(Err(e)) => return Err(e),
         }
     }
 
@@ -323,7 +380,7 @@ async fn handle_websocket(
 }
 
 async fn process_request(
-    stream: &mut WebSocketStream<TcpStream>,
+    stream: Arc<TokioMutex<WebSocketStream<TcpStream>>>,
     shared: &BridgeSharedConfig,
     transport: &Arc<dyn AgentTransport>,
     initialized: &mut bool,
@@ -335,7 +392,7 @@ async fn process_request(
     let method = match method {
         Some(method) => method,
         None => {
-            send_error(stream, id, acp::Error::invalid_request()).await?;
+            send_error_shared(&stream, id, acp::Error::invalid_request()).await?;
             return Ok(());
         }
     };
@@ -346,8 +403,8 @@ async fn process_request(
             let request: acp::InitializeRequest = match serde_json::from_value(params) {
                 Ok(request) => request,
                 Err(err) => {
-                    send_error(
-                        stream,
+                    send_error_shared(
+                        &stream,
                         id,
                         acp::Error::invalid_params().with_data(err.to_string()),
                     )
@@ -362,19 +419,19 @@ async fn process_request(
                     ensure_bridge_meta(&mut response, &shared.bridge_id);
                     let result = serde_json::to_value(response)
                         .map_err(|err| tungstenite::Error::Io(std::io::Error::other(err)))?;
-                    send_result(stream, id, result).await?;
+                    send_result_shared(&stream, id, result).await?;
                     *initialized = true;
                 }
                 Err(err) => {
                     let error = err.into_rpc_error();
-                    send_error(stream, id, error).await?;
+                    send_error_shared(&stream, id, error).await?;
                 }
             }
         }
         "session/new" => {
             if !*initialized {
                 let error = acp::Error::method_not_found();
-                send_error(stream, id, error).await?;
+                send_error_shared(&stream, id, error).await?;
                 return Ok(());
             }
 
@@ -382,8 +439,8 @@ async fn process_request(
             let request: acp::NewSessionRequest = match serde_json::from_value(params) {
                 Ok(request) => request,
                 Err(err) => {
-                    send_error(
-                        stream,
+                    send_error_shared(
+                        &stream,
                         id,
                         acp::Error::invalid_params().with_data(err.to_string()),
                     )
@@ -397,17 +454,56 @@ async fn process_request(
                 Ok(response) => {
                     let result = serde_json::to_value(response)
                         .map_err(|err| tungstenite::Error::Io(std::io::Error::other(err)))?;
-                    send_result(stream, id, result).await?;
+                    send_result_shared(&stream, id, result).await?;
                 }
                 Err(err) => {
                     let error = err.into_rpc_error();
-                    send_error(stream, id, error).await?;
+                    send_error_shared(&stream, id, error).await?;
+                }
+            }
+        }
+        "session/prompt" => {
+            if !*initialized {
+                let error = acp::Error::method_not_found();
+                send_error_shared(&stream, id, error).await?;
+                return Ok(());
+            }
+
+            let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
+
+            // Convert from simple { sessionId, prompt } to ACP format
+            let session_id = params.get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let prompt_text = params.get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let request = acp::PromptRequest {
+                session_id: acp::SessionId(session_id.into()),
+                prompt: vec![acp::ContentBlock::from(prompt_text)],
+                meta: None,
+            };
+
+            let notification_sender = Arc::new(WebSocketNotificationSender::new(stream.clone()));
+            let response = transport.prompt(request, notification_sender).await;
+            match response {
+                Ok(response) => {
+                    let result = serde_json::to_value(response)
+                        .map_err(|err| tungstenite::Error::Io(std::io::Error::other(err)))?;
+                    send_result_shared(&stream, id, result).await?;
+                }
+                Err(err) => {
+                    let error = err.into_rpc_error();
+                    send_error_shared(&stream, id, error).await?;
                 }
             }
         }
         _ => {
             let error = acp::Error::method_not_found();
-            send_error(stream, id, error).await?;
+            send_error_shared(&stream, id, error).await?;
         }
     }
 
@@ -447,6 +543,24 @@ async fn send_error(
         "error": error,
     });
     send_json(stream, payload).await
+}
+
+async fn send_result_shared(
+    stream: &Arc<TokioMutex<WebSocketStream<TcpStream>>>,
+    id: Value,
+    result: Value,
+) -> Result<(), tungstenite::Error> {
+    let mut guard = stream.lock().await;
+    send_result(&mut *guard, id, result).await
+}
+
+async fn send_error_shared(
+    stream: &Arc<TokioMutex<WebSocketStream<TcpStream>>>,
+    id: Value,
+    error: acp::Error,
+) -> Result<(), tungstenite::Error> {
+    let mut guard = stream.lock().await;
+    send_error(&mut *guard, id, error).await
 }
 
 async fn send_json(

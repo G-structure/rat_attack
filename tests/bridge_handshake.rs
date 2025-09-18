@@ -562,6 +562,7 @@ impl AgentTransport for FakeAgentTransport {
     fn prompt(
         &self,
         _request: acp::PromptRequest,
+        _notification_sender: Arc<dyn ct_bridge::NotificationSender>,
     ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>>
     {
         Box::pin(async move {
@@ -644,6 +645,7 @@ impl AgentTransport for FakeStreamingAgentTransport {
     fn prompt(
         &self,
         request: acp::PromptRequest,
+        notification_sender: Arc<dyn ct_bridge::NotificationSender>,
     ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>>
     {
         let state = self.state.clone();
@@ -661,7 +663,47 @@ impl AgentTransport for FakeStreamingAgentTransport {
                 prompt: prompt_text,
             });
 
-            // Return a simple response with stopReason for now
+            // Send any configured streaming updates
+            let streaming_updates = guard.streaming_updates.clone();
+            let has_configured_updates = !streaming_updates.is_empty();
+            drop(guard); // Release the lock before sending notifications
+
+            // Send session/update notifications for each streaming update
+            for update in streaming_updates {
+                if let Err(e) = notification_sender.send_notification("session/update", update).await {
+                    eprintln!("Failed to send session/update notification: {:?}", e);
+                }
+            }
+
+            // If no specific updates were configured, send some default streaming updates
+            if !has_configured_updates {
+                // Send a few default session/update notifications
+                let default_updates = vec![
+                    json!({
+                        "sessionId": request.session_id.0,
+                        "chunk": {"type": "text", "content": "Thinking"},
+                        "index": 0
+                    }),
+                    json!({
+                        "sessionId": request.session_id.0,
+                        "chunk": {"type": "text", "content": "..."},
+                        "index": 1
+                    }),
+                    json!({
+                        "sessionId": request.session_id.0,
+                        "chunk": {"type": "text", "content": " about your request"},
+                        "index": 2
+                    })
+                ];
+
+                for update in default_updates {
+                    if let Err(e) = notification_sender.send_notification("session/update", update).await {
+                        eprintln!("Failed to send default session/update notification: {:?}", e);
+                    }
+                }
+            }
+
+            // Return a simple response with stopReason
             use agent_client_protocol as acp;
             Ok(acp::PromptResponse {
                 stop_reason: acp::StopReason::EndTurn,
