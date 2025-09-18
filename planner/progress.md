@@ -29,3 +29,17 @@
 **Prompts/Notes:** planner/notes/002.md
 
 **Status:** APPLIED
+
+## PLAN 003 — WS initialize handshake
+[x] 003 — WS initialize handshake
+• acceptance: Bridge only accepts WebSocket upgrades from allow-listed origins offering `acp.jsonrpc.v1`, forwards `initialize` through `agent-client-protocol`, and injects `_meta.bridgeId` while rejecting other methods.
+• prompts: [prompts/003_test.md](./prompts/003_test.md), [prompts/003_code.md](./prompts/003_code.md)
+• status: applied
+• notes:
+    - context: src/lib.rs, tests/bridge_handshake.rs
+    - js: not-run (no vitest script defined)
+    - rust: pass (`cargo test`)
+    - follow-ups: ensure later steps cover fs/permissions methods, multi-session routing, and concrete agent spawn wiring
+• next:
+    - implement fs capability handling after handshake
+    - add structured logging for bridge admission errors
