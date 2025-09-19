@@ -148,3 +148,42 @@
 • next:
     - extend login flow to surface progress updates and capture stderr for UI (RAT-LWS-REQ-094)
     - wire multi-agent launcher registry with cached credentials
+## PLAN 016 — Bridge switcher toggle UI
+[x] 016 — Bridge switcher toggle UI
+• acceptance: BridgeSwitcher lists bridges with accessible active state and selection callback (RAT-LWS-REQ-145).
+• prompts: [prompts/016_test.md](./prompts/016_test.md), [prompts/016_code.md](./prompts/016_code.md)
+• status: done
+• notes:
+    - context: ct-web/src/components/BridgeSwitcher.tsx, ct-web/src/components/BridgeSwitcher.test.tsx, ct-web/src/App.tsx
+    - js: pnpm vitest --run → PASS
+    - rust: cargo test → PASS
+    - follow-ups: integrate bridge switcher into App shell with state persistence
+• next:
+    - RAT-LWS-REQ-145: add persistence of last active bridge in local storage
+    - RAT-LWS-REQ-301: wire bridge switcher to manage multiple websocket connections
+    - RAT-LWS-REQ-144: scaffold permission dialog UI structure
+## UPDATE 016 — 2025-09-18T12:20Z tests failing
+• status: tests-failing
+• notes:
+    - added BridgeSwitcher tests expecting accessible active state + selection callback
+    - vitest command fails because tooling not yet installed (expected for RED phase)
+    - cargo test revealed existing regression in bridge_handshake_caches_allow_always_permission_decisions (needs follow-up once frontend step completes)
+• js: pnpm vitest --run (from ct-web) → command "vitest" not found
+• rust: cargo test → FAIL (bridge_handshake_caches_allow_always_permission_decisions)
+• evidence: [notes/016_test.md](../notes/016_test.md)
+## UPDATE 016 — 2025-09-18T12:55Z green
+• status: green
+• notes:
+    - installed Solid vitest toolchain, added BridgeSwitcher component, and ensured accessible toggles trigger onSelect for inactive bridges
+    - adjusted BridgeSwitcher tests with afterEach(cleanup) to prevent DOM leakage (documented as minimal correction)
+    - pnpm lint/format scripts missing; commands fail and should be added in future step
+• js: pnpm vitest --run → PASS (2 tests in BridgeSwitcher.test.tsx)
+• rust: cargo test → PASS (33 tests)
+• evidence: [notes/016_code.md](../notes/016_code.md)
+## UPDATE 016 — 2025-09-18T13:00Z done
+• status: done
+• notes:
+    - acceptance met; BridgeSwitcher toggle UI covered by passing tests and tooling configured
+• js: pnpm vitest --run → PASS
+• rust: cargo test → PASS
+• evidence: commit pending with bridge switcher implementation
