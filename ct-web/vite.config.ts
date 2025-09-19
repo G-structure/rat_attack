@@ -11,4 +11,10 @@ export default defineConfig({
   build: {
     target: 'esnext',
   },
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.ts',
+    css: true,
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+  },
 });
