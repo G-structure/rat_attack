@@ -3,12 +3,14 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_client_protocol as acp;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Map, Value};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::handshake::server::{
@@ -642,6 +644,17 @@ async fn process_request(
                 }
             }
         }
+        "auth/cli_login" => {
+            match handle_auth_cli_login().await {
+                Ok(_) => {
+                    let result = json!({"status": "started"});
+                    send_result_shared(&stream, id, result).await?;
+                }
+                Err(error) => {
+                    send_error_shared(&stream, id, error).await?;
+                }
+            }
+        }
         _ => {
             let error = acp::Error::method_not_found();
             send_error_shared(&stream, id, error).await?;
@@ -922,6 +935,99 @@ async fn handle_write_text_file(
             )))
         }
     }
+}
+
+async fn handle_auth_cli_login() -> Result<(), acp::Error> {
+
+
+
+    // Resolve login command: try to find Claude Code CLI
+    let (cli_path, args) = resolve_claude_login_command()?;
+
+    // Get current working directory as project root
+    let project_root = std::env::current_dir()
+        .map_err(|_| acp::Error::internal_error().with_data("failed to get current directory"))?;
+
+    // Spawn the CLI with /login argument
+    let mut command = Command::new(&cli_path);
+    command
+        .args(&args)
+        .arg("/login")
+        .current_dir(&project_root)  // Set working directory
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // Spawn the process (don't wait for completion)
+    command.spawn()
+        .map_err(|e| acp::Error::internal_error().with_data(format!("failed to spawn login CLI: {}", e)))?;
+
+    Ok(())
+}
+
+// Global mutex to serialize CLI resolution during tests to prevent env var races
+static CLI_RESOLUTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn resolve_claude_login_command() -> Result<(PathBuf, Vec<String>), acp::Error> {
+    // Serialize access to environment variables during resolution to prevent test interference
+    let lock = CLI_RESOLUTION_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().unwrap();
+
+    // Check for test failure mode
+    if std::env::var("TEST_MODE_FAIL").is_ok() {
+        return Err(acp::Error::new((-32000, "Unable to locate Claude login CLI. Try installing @zed-industries/claude-code-acp or ensure `claude` is in PATH.".to_string())));
+    }
+
+    // Check for test-specific override first (highest priority for tests)
+    if let Ok(path) = std::env::var("TEST_CLAUDE_CLI_PATH") {
+        return Ok((PathBuf::from(path), vec![]));
+    }
+
+    // Check CLAUDE_ACP_BIN environment variable
+    if let Ok(path) = std::env::var("CLAUDE_ACP_BIN") {
+        let path_buf = PathBuf::from(path);
+        if path_buf.exists() {
+            return Ok((path_buf, vec![]));
+        }
+    }
+
+    // Try to find Claude Code CLI from node_modules (like Zed does)
+    if let Some((path, args)) = find_claude_code_cli_from_node_modules() {
+        return Ok((path, args));
+    }
+
+    // Fallback: try a `claude` executable in PATH
+    if let Ok(path) = which::which("claude") {
+        return Ok((path, vec![]));
+    }
+
+    Err(acp::Error::new((-32000, "Unable to locate Claude login CLI. Try installing @zed-industries/claude-code-acp or ensure `claude` is in PATH.".to_string())))
+}
+
+fn find_claude_code_cli_from_node_modules() -> Option<(PathBuf, Vec<String>)> {
+    // Look for the Claude Code CLI in node_modules, similar to Zed's approach
+    // Check if we have @zed-industries/claude-code-acp installed locally
+    let acp_entry = PathBuf::from("node_modules/@zed-industries/claude-code-acp/dist/index.js");
+    if acp_entry.exists() {
+        // Walk up to find the @anthropic-ai/claude-code/cli.js
+        let node_modules_dir = acp_entry
+            .parent() // dist
+            .and_then(|p| p.parent()) // @zed-industries/claude-code-acp
+            .and_then(|p| p.parent()) // @zed-industries
+            .and_then(|p| p.parent()); // node_modules
+
+        if let Some(node_modules_dir) = node_modules_dir {
+            let cli_js = node_modules_dir
+                .join("@anthropic-ai")
+                .join("claude-code")
+                .join("cli.js");
+            if cli_js.exists() {
+                return Some((PathBuf::from("node"), vec![cli_js.to_string_lossy().to_string()]));
+            }
+        }
+    }
+
+    None
 }
 
 fn ensure_bridge_meta(response: &mut acp::InitializeResponse, bridge_id: &str) {

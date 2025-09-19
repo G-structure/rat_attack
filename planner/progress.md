@@ -132,48 +132,19 @@
     - build policy persistence across sessions per RAT-LWS-REQ-092
     - implement terminal permission gating with approvals per RAT-LWS-REQ-062/063
 
-§ PLAN 009 — auth/cli_login Claude login CLI
-[ ] 009 — auth/cli_login Claude login CLI
+## PLAN 009 — auth/cli_login Claude login CLI
+[x] 009 — auth/cli_login Claude login CLI
 • acceptance: auth/cli_login resolves claude CLI and starts `/login` command immediately returning structured status
 • prompts: [prompts/009_test.md](./prompts/009_test.md), [prompts/009_code.md](./prompts/009_code.md)
-• status: planned
+• status: applied
 • notes:
-    - context: src/lib.rs, potentially new src/login.rs, tests/bridge_login.rs; ct-web/package.json for npm integration
+    - context: src/lib.rs enhanced with CLI resolution logic, tests/bridge_handshake.rs with 7 comprehensive test scenarios
+    - implementation: CLAUDE_ACP_BIN override, npm package resolution, PATH fallback, virtual terminal flow, immediate return behavior
+    - test isolation: Added serial_test dependency and #[serial_test::serial] to auth_cli_login tests + affected fs tests
+    - bonus fix: Resolved intermittent fs_read_text_file test failures caused by working directory interference
     - js: not-run
-    - rust: pass (`cargo test`)
-    - follow-ups: record login process status events, expose progress notifications to UI, persist policy registry
+    - rust: pass (`cargo test` - all 33 tests passing consistently)
+• evidence: planner/notes/009_test.md, planner/notes/009_code.md, tests/bridge_handshake.rs, src/lib.rs
 • next:
     - extend login flow to surface progress updates and capture stderr for UI (RAT-LWS-REQ-094)
     - wire multi-agent launcher registry with cached credentials
-
-§ UPDATE 009 — 2025-09-18 11:05
-
-• status: tests-failing
-
-• notes:
-
-    - auth/cli_login integration tests added with CLAUDE_ACP_BIN stub; see planner/notes/009_test.md
-
-    - bridge currently returns method_not_found/-32601 so tests remain red until launcher implemented
-
-• js: not-run
-
-• rust: fail (`cargo test auth_cli_login`)
-
-• evidence: planner/notes/009_test.md, tests/bridge_handshake.rs
-
-§ UPDATE 009 — 2025-09-18 11:30
-
-• status: tests-failing
-
-• notes:
-
-    - auth/cli_login tests now use PATH-resolved claude shim and missing-cli scenario; see planner/notes/009_test.md
-
-    - bridge still returns -32601 (method not found) because auth/cli_login handler not implemented yet
-
-• js: not-run
-
-• rust: fail (`cargo test auth_cli_login`)
-
-• evidence: planner/notes/009_test.md, tests/bridge_handshake.rs

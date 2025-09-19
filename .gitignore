@@ -5,3 +5,4 @@ target
 cache_*.txt
 no_policy_test.txt
 test_*.txt
+.external_agents/
