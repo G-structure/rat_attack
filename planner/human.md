@@ -14,8 +14,11 @@ Zed’s ACP notes are the fastest way to build intuition before touching the bri
 
 **WHEN TO DIVE INTO THE EXTERNAL CODEBASES**
 The vendored repos under `external_refrence/` are checked out to the exact versions we target. Treat them as living specs—open them whenever you wonder how the real implementations solve a problem.
-- `external_refrence/claude-code-acp`: Claude’s ACP adapter. Explore to see how agents structure `initialize`, session streaming, tool invocation, and MCP proxying. Copy interaction patterns rather than guessing.
+- `external_refrence/claude-code-acp`: Claude's ACP adapter. Explore to see how agents structure `initialize`, session streaming, tool invocation, and MCP proxying. Copy interaction patterns rather than guessing.
 - `external_refrence/agent-client-protocol`: Canonical ACP library (Rust + TS) plus schema. Use it to confirm field names, error semantics, and helper APIs before writing code. Prefer importing its types over rolling our own.
+- `external_refrence/zed`: Zed editor source code. Reference for GPUI patterns, UI architecture, and ACP client implementation. Check `CLAUDE.md` for Rust coding guidelines and GPUI best practices.
+- `external_refrence/opencode`: Open-source AI coding agent built for terminals. Study its client/server architecture, TUI design patterns, and multi-provider LLM integration for terminal-based AI tool inspiration.
+- `external_refrence/sst`: Infrastructure-as-code framework using Pulumi/Terraform. Reference for build patterns, CLI design, and TypeScript/Go polyglot project structure. See `CLAUDE.md` for build commands and style guidelines.
 
 ## Additional Guidance
 - CT-BRIDGE is an ACP **client-side** implementation. It forwards ACP JSON-RPC between CT-WEB and downstream agents while owning local capabilities (fs, permissions, terminal). Keep it thin—no bespoke agent logic.
