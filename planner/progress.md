@@ -148,3 +148,16 @@
 • next:
     - extend login flow to surface progress updates and capture stderr for UI (RAT-LWS-REQ-094)
     - wire multi-agent launcher registry with cached credentials
+§ PLAN 011 — auth/cli_login progress streaming
+[ ] 011 — auth/cli_login progress streaming
+• acceptance: Stream CLI stderr to CT-WEB as progress notifications and emit completion once the login CLI exits.
+• prompts: [prompts/011_test.md](./prompts/011_test.md), [prompts/011_code.md](./prompts/011_code.md)
+• status: planned
+• notes:
+    - context: src/lib.rs, tests/bridge_handshake.rs
+    - js: not-run
+    - rust: not-run
+    - follow-ups: ensure audit logging of auth outcomes per RAT-LWS-REQ-094
+• next:
+    - Extend auth/cli_login to surface provider URLs via AWP start endpoint (RAT-LWS-REQ-208)
+    - Begin terminal execution permission flow (RAT-LWS-REQ-062)
