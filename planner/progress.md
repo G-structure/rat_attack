@@ -148,3 +148,16 @@
 • next:
     - extend login flow to surface progress updates and capture stderr for UI (RAT-LWS-REQ-094)
     - wire multi-agent launcher registry with cached credentials
+§ PLAN 015 — fs/read_text_file truncation meta
+[ ] 015 — fs/read_text_file truncation meta
+• acceptance: Flag truncated fs/read_text_file results by setting `_meta.truncated` when a line_limit trims content.
+• prompts: [prompts/015_test.md](./prompts/015_test.md), [prompts/015_code.md](./prompts/015_code.md)
+• status: planned
+• notes:
+    - context: src/lib.rs, tests/bridge_handshake.rs
+    - js: not-run
+    - rust: not-run
+    - follow-ups: persist permission cache per RAT-LWS-REQ-092; surface auth CLI progress updates (RAT-LWS-REQ-094)
+• next:
+    - RAT-LWS-REQ-092: persist always-allow decisions across sessions
+    - RAT-LWS-REQ-094: emit auth/cli_login progress + stderr for UI streaming
