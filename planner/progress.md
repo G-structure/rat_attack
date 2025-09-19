@@ -148,3 +148,17 @@
 • next:
     - extend login flow to surface progress updates and capture stderr for UI (RAT-LWS-REQ-094)
     - wire multi-agent launcher registry with cached credentials
+§ PLAN 012 — permission policy persistence
+[ ] 012 — permission policy persistence
+• acceptance: Persist allow/reject always decisions for fs/write_text_file so restarts reuse them while uncached paths still prompt.
+• prompts: [prompts/012_test.md](./prompts/012_test.md), [prompts/012_code.md](./prompts/012_code.md)
+• status: planned
+• notes:
+    - context: src/lib.rs, tests/bridge_handshake.rs
+    - js: not-run (SolidJS untouched)
+    - rust: pending (new tests expected to fail)
+    - follow-ups: expand policy store to cover other tool kinds and add audit logging (RAT-LWS-REQ-094)
+• next:
+    - RAT-LWS-REQ-094 — record permission prompts/outcomes with redaction
+    - RAT-LWS-REQ-062 — gate terminal/start with permission prompts
+    - RAT-LWS-REQ-205 — design AWP callback capture scaffolding
