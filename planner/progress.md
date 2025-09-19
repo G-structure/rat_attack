@@ -148,3 +148,16 @@
 • next:
     - extend login flow to surface progress updates and capture stderr for UI (RAT-LWS-REQ-094)
     - wire multi-agent launcher registry with cached credentials
+§ PLAN 014 — permission policy persistence across restarts
+[ ] 014 — permission policy persistence across restarts
+• acceptance: Persist fs/write_text_file allow_always decisions to a bridge policy store and reload them after restart so the next write skips permission prompts.
+• prompts: [prompts/014_test.md](./prompts/014_test.md), [prompts/014_code.md](./prompts/014_code.md)
+• status: planned
+• notes:
+    - context: src/lib.rs, tests/bridge_handshake.rs
+    - js: not-run
+    - rust: not-run
+    - follow-ups: ensure reject_always persistence and broader policy registry coverage
+• next:
+    - RAT-LWS-REQ-092: persist reject_always decisions across bridge restarts
+    - RAT-LWS-REQ-062/063: implement terminal execution permission gating and output streaming
