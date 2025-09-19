@@ -1,18 +1,23 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::process::Stdio;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
+use std::time::Duration;
 
 use agent_client_protocol as acp;
 use futures_util::{SinkExt, StreamExt};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde_json::{json, Map, Value};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::process::Command;
-use tokio::sync::{oneshot, Mutex as TokioMutex};
+use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request, Response as HandshakeResponse,
 };
@@ -644,17 +649,18 @@ async fn process_request(
                 }
             }
         }
-        "auth/cli_login" => {
-            match handle_auth_cli_login().await {
-                Ok(_) => {
-                    let result = json!({"status": "started"});
-                    send_result_shared(&stream, id, result).await?;
-                }
-                Err(error) => {
-                    send_error_shared(&stream, id, error).await?;
-                }
+        "auth/cli_login" => match handle_auth_cli_login().await {
+            Ok(login_url) => {
+                let result = json!({
+                    "status": "started",
+                    "loginUrl": login_url,
+                });
+                send_result_shared(&stream, id, result).await?;
             }
-        }
+            Err(error) => {
+                send_error_shared(&stream, id, error).await?;
+            }
+        },
         _ => {
             let error = acp::Error::method_not_found();
             send_error_shared(&stream, id, error).await?;
@@ -937,32 +943,110 @@ async fn handle_write_text_file(
     }
 }
 
-async fn handle_auth_cli_login() -> Result<(), acp::Error> {
-
-
-
-    // Resolve login command: try to find Claude Code CLI
+async fn handle_auth_cli_login() -> Result<String, acp::Error> {
     let (cli_path, args) = resolve_claude_login_command()?;
 
-    // Get current working directory as project root
     let project_root = std::env::current_dir()
         .map_err(|_| acp::Error::internal_error().with_data("failed to get current directory"))?;
 
-    // Spawn the CLI with /login argument
-    let mut command = Command::new(&cli_path);
-    command
-        .args(&args)
-        .arg("/login")
-        .current_dir(&project_root)  // Set working directory
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|err| {
+            acp::Error::internal_error().with_data(format!("failed to open pty: {err}"))
+        })?;
 
-    // Spawn the process (don't wait for completion)
-    command.spawn()
-        .map_err(|e| acp::Error::internal_error().with_data(format!("failed to spawn login CLI: {}", e)))?;
+    let cli_command = cli_path
+        .to_str()
+        .ok_or_else(|| acp::Error::internal_error().with_data("invalid Claude CLI path"))?
+        .to_string();
 
-    Ok(())
+    let mut builder = CommandBuilder::new(cli_command);
+    for arg in &args {
+        builder.arg(arg);
+    }
+    builder.arg("/login");
+    builder.cwd(&project_root);
+    for (key, value) in std::env::vars() {
+        builder.env(key, value);
+    }
+
+    let child = pair.slave.spawn_command(builder).map_err(|err| {
+        acp::Error::internal_error().with_data(format!("failed to spawn login CLI: {err}"))
+    })?;
+    drop(pair.slave);
+
+    let mut reader = pair.master.try_clone_reader().map_err(|err| {
+        acp::Error::internal_error().with_data(format!("failed to clone pty reader: {err}"))
+    })?;
+    let mut writer = pair.master.take_writer().map_err(|err| {
+        acp::Error::internal_error().with_data(format!("failed to take pty writer: {err}"))
+    })?;
+
+    let automation_stop = Arc::new(AtomicBool::new(false));
+    let writer_stop = automation_stop.clone();
+    let writer_thread = std::thread::spawn(move || {
+        while !writer_stop.load(Ordering::Relaxed) {
+            if writer.write_all(b"\r").is_err() {
+                break;
+            }
+            let _ = writer.flush();
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let reader_stop = automation_stop.clone();
+    let reader_thread = std::thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while !reader_stop.load(Ordering::Relaxed) {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    if tx.send(buffer[..read].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let capture_stop = automation_stop.clone();
+    let capture = async move {
+        let mut collected = String::new();
+        while let Some(chunk) = rx.recv().await {
+            let text = String::from_utf8_lossy(&chunk);
+            collected.push_str(&text);
+            if let Some(url) = extract_login_url(&collected) {
+                capture_stop.store(true, Ordering::Relaxed);
+                return Ok::<String, acp::Error>(url);
+            }
+        }
+
+        capture_stop.store(true, Ordering::Relaxed);
+        Err(acp::Error::internal_error().with_data("login CLI exited before emitting a login URL"))
+    };
+
+    let capture_result = timeout(Duration::from_secs(30), capture).await;
+
+    automation_stop.store(true, Ordering::Relaxed);
+    let _ = writer_thread.join();
+    let _ = reader_thread.join();
+
+    let result = capture_result.map_err(|_| {
+        acp::Error::internal_error().with_data("timed out waiting for Claude login URL")
+    })?;
+
+    // Detach the child process; the CLI continues running until the user completes login.
+    drop(child);
+
+    result
 }
 
 // Global mutex to serialize CLI resolution during tests to prevent env var races
@@ -1022,12 +1106,39 @@ fn find_claude_code_cli_from_node_modules() -> Option<(PathBuf, Vec<String>)> {
                 .join("claude-code")
                 .join("cli.js");
             if cli_js.exists() {
-                return Some((PathBuf::from("node"), vec![cli_js.to_string_lossy().to_string()]));
+                return Some((
+                    PathBuf::from("node"),
+                    vec![cli_js.to_string_lossy().to_string()],
+                ));
             }
         }
     }
 
     None
+}
+
+fn extract_login_url(buffer: &str) -> Option<String> {
+    let start = buffer.find("https://")?;
+    let tail = &buffer[start..];
+    let mut end = tail.len();
+    for (idx, ch) in tail.char_indices() {
+        if ch.is_whitespace() || ch == '"' || ch == '\'' || ch == '\u{7}' || ch == '\u{1b}' {
+            end = idx;
+            break;
+        }
+    }
+    let mut url = tail[..end].to_string();
+    if let Some(pos) = url.find('\u{7}') {
+        url.truncate(pos);
+    }
+    if let Some(pos) = url.find('\u{1b}') {
+        url.truncate(pos);
+    }
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
 }
 
 fn ensure_bridge_meta(response: &mut acp::InitializeResponse, bridge_id: &str) {
