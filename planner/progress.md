@@ -148,3 +148,16 @@
 • next:
     - extend login flow to surface progress updates and capture stderr for UI (RAT-LWS-REQ-094)
     - wire multi-agent launcher registry with cached credentials
+§ PLAN 017 — fs/read_text_file sandbox escape guard
+[ ] 017 — fs/read_text_file sandbox escape guard
+• acceptance: reject fs/read_text_file paths that resolve outside project root without invoking permission flow (RAT-LWS-REQ-044)
+• prompts: [prompts/017_test.md](./prompts/017_test.md), [prompts/017_code.md](./prompts/017_code.md)
+• status: planned
+• notes:
+    - context: tests/bridge_handshake.rs new regression; src/lib.rs path sandboxing helpers
+    - js: not-run
+    - rust: not-run
+    - follow-ups: extend same guard to other tool namespaces (terminal, auth proxy paths)
+• next:
+    - enforce project-root sandbox for fs/write_text_file relative `../` escapes (RAT-LWS-REQ-044)
+    - add terminal execution permission gating test per RAT-LWS-REQ-062/063
