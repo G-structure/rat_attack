@@ -148,3 +148,38 @@
 • next:
     - extend login flow to surface progress updates and capture stderr for UI (RAT-LWS-REQ-094)
     - wire multi-agent launcher registry with cached credentials
+§ PLAN 010 — fs/write_text_file permission audit trail
+[ ] 010 — fs/write_text_file permission audit trail
+• acceptance: Log redacted prompt/outcome entries for fs/write_text_file permissions with canonical-path hashing.
+• prompts: [prompts/010_test.md](./prompts/010_test.md), [prompts/010_code.md](./prompts/010_code.md)
+• status: planned
+• notes:
+    - context: src/lib.rs, tests/bridge_handshake.rs, Cargo.toml (dev-deps for hashing/tempfiles)
+    - js: not-run
+    - rust: not-run
+    - follow-ups: consider central audit logger for terminal + auth events; persist policy registry to disk
+• next:
+    - expand audit coverage to terminal approvals per RAT-LWS-REQ-062/094
+    - persist permission policies and audit logs per RAT-LWS-REQ-092
+    - surface audit summaries to CT-WEB diagnostic view (spec RAT-LWS-REQ-131)
+§ UPDATE 010 — renumbered to 013
+• status: planned
+• notes:
+    - step renumbered to 013 per latest instructions; see PLAN 013 for active prompts.
+• js: not-run
+• rust: not-run
+
+§ PLAN 013 — fs/write_text_file permission audit trail
+[ ] 013 — fs/write_text_file permission audit trail
+• acceptance: Log redacted prompt/outcome entries for fs/write_text_file permissions with canonical-path hashing.
+• prompts: [prompts/013_test.md](./prompts/013_test.md), [prompts/013_code.md](./prompts/013_code.md)
+• status: planned
+• notes:
+    - context: src/lib.rs, tests/bridge_handshake.rs, Cargo.toml (dev-deps for hashing/tempfiles)
+    - js: not-run
+    - rust: not-run
+    - follow-ups: consider central audit logger for terminal + auth events; persist policy registry to disk
+• next:
+    - expand audit coverage to terminal approvals per RAT-LWS-REQ-062/094
+    - persist permission policies and audit logs per RAT-LWS-REQ-092
+    - surface audit summaries to CT-WEB diagnostic view (spec RAT-LWS-REQ-131)
