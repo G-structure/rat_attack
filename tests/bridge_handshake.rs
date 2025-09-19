@@ -5,8 +5,10 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use url::Url;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -83,7 +85,11 @@ async fn bridge_handshake_accepts_initialize() {
     )
     .await;
 
-    let message = next_message(&mut ws).await;
+    let message = timeout(Duration::from_secs(60), ws.next())
+        .await
+        .expect("websocket response timed out waiting for login URL")
+        .expect("stream ended unexpectedly")
+        .expect("failed to receive message");
     let payload = parse_json(&message);
 
     assert_eq!(payload.get("id"), Some(&json!("req-1")));
@@ -121,13 +127,16 @@ async fn auth_cli_login_resolves_claude_acp_bin_override() {
     let cwd_path = temp.path().join("override-cwd.txt");
 
     let script_body = format!(
-        "#!/bin/sh\nPWD=`pwd`\necho \"$PWD\" > \"{cwd}\"\ntouch \"{sentinel}\"\nsleep 1\n",
+        "#!/bin/sh\nPWD=`pwd`\necho \"$PWD\" > \"{cwd}\"\necho 'https://example.com/login'\ntouch \"{sentinel}\"\nsleep 1\n",
         cwd = cwd_path.display(),
         sentinel = sentinel_path.display()
     );
 
     let claude_override = temp.write_bin_executable("claude-override", &script_body);
-    let _env_guard = EnvVarGuard::set_var("CLAUDE_ACP_BIN", claude_override.to_string_lossy().to_string());
+    let _env_guard = EnvVarGuard::set_var(
+        "CLAUDE_ACP_BIN",
+        claude_override.to_string_lossy().to_string(),
+    );
 
     let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
     let harness = BridgeHarness::start(agent.clone()).await;
@@ -159,11 +168,19 @@ async fn auth_cli_login_resolves_claude_acp_bin_override() {
         .get("result")
         .expect("auth/cli_login should return success when CLAUDE_ACP_BIN is valid");
     assert_eq!(result.get("status"), Some(&json!("started")));
+    let login_url = result
+        .get("loginUrl")
+        .and_then(|value| value.as_str())
+        .expect("auth/cli_login should surface a login URL");
+    assert!(
+        login_url.starts_with("https://example.com"),
+        "expected stub CLI login url, got {login_url}"
+    );
 
     wait_for_path(&sentinel_path).await;
 
-    let recorded_cwd = fs::read_to_string(&cwd_path)
-        .expect("override should record working directory");
+    let recorded_cwd =
+        fs::read_to_string(&cwd_path).expect("override should record working directory");
     let expected_cwd = env::current_dir().expect("current dir available");
     assert_eq!(
         Path::new(recorded_cwd.trim()),
@@ -185,14 +202,17 @@ async fn auth_cli_login_downloads_claude_code_acp_package() {
     let anthropic_dir = node_modules.join("@anthropic-ai").join("claude-code");
     fs::create_dir_all(&anthropic_dir).expect("create anthropic dir");
 
-    let zed_dir = node_modules.join("@zed-industries").join("claude-code-acp").join("dist");
+    let zed_dir = node_modules
+        .join("@zed-industries")
+        .join("claude-code-acp")
+        .join("dist");
     fs::create_dir_all(&zed_dir).expect("create zed dir");
 
     let sentinel_path = temp.path().join("npm-claude-invoked");
     let cli_js = anthropic_dir.join("cli.js");
 
     let script_body = format!(
-        "#!/usr/bin/env node\nconsole.log('Claude Code CLI started');\nconst fs = require('fs');\nfs.writeFileSync('{}', 'invoked');\nsetTimeout(() => {{}}, 1000);\n",
+        "#!/usr/bin/env node\nconsole.log('Claude Code CLI started');\nconsole.log('https://example.com/login');\nconst fs = require('fs');\nfs.writeFileSync('{}', 'invoked');\nsetTimeout(() => {{}}, 1000);\n",
         sentinel_path.display()
     );
 
@@ -202,7 +222,9 @@ async fn auth_cli_login_downloads_claude_code_acp_package() {
     // Change to the temp directory so node_modules is found
     let original_dir = env::current_dir().expect("get current dir");
     env::set_current_dir(temp.path()).expect("change to temp dir");
-    let _dir_guard = DirGuard { original: original_dir };
+    let _dir_guard = DirGuard {
+        original: original_dir,
+    };
 
     let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
     let harness = BridgeHarness::start(agent.clone()).await;
@@ -234,6 +256,13 @@ async fn auth_cli_login_downloads_claude_code_acp_package() {
         .get("result")
         .expect("auth/cli_login should find claude CLI from node_modules");
     assert_eq!(result.get("status"), Some(&json!("started")));
+    let login_url = result
+        .get("loginUrl")
+        .and_then(|value| value.as_str())
+        .expect("auth/cli_login should surface a login URL");
+    let parsed = Url::parse(login_url).expect("loginUrl must be a valid URL");
+    assert_eq!(parsed.scheme(), "https", "expected https login url");
+    assert_eq!(parsed.domain(), Some("example.com"));
 
     wait_for_path(&sentinel_path).await;
 
@@ -248,14 +277,38 @@ async fn auth_cli_login_handles_virtual_terminal_like_zed() {
     let sentinel_path = temp.path().join("terminal-login-invoked");
     let terminal_output_path = temp.path().join("terminal-output.txt");
 
-    let script_body = format!(
-        "#!/bin/sh\necho 'Starting Claude login...' > \"{output}\"\necho 'Please visit: https://claude.ai/login' >> \"{output}\"\necho 'Login successful!' >> \"{output}\"\ntouch \"{sentinel}\"\nsleep 2\n",
-        output = terminal_output_path.display(),
-        sentinel = sentinel_path.display()
-    );
+    let script_body = {
+        let mut script = String::from("#!/bin/sh\n");
+        script.push_str(&format!(
+            "echo 'Starting Claude login...' > \"{output}\"\n",
+            output = terminal_output_path.display()
+        ));
+        script.push_str(&format!(
+            "for attempt in 1 2 3 4 5 6 7 8; do\n  echo \"Prompt $attempt\" >> \"{output}\"\n  if ! read answer; then\n    echo 'Read failed' >> \"{output}\"\n    exit 1\n  fi\ndone\n",
+            output = terminal_output_path.display()
+        ));
+        script.push_str(&format!(
+            "echo 'Please visit: https://claude.ai/login' >> \"{output}\"\n",
+            output = terminal_output_path.display()
+        ));
+        script.push_str(&format!(
+            "echo 'Login successful!' >> \"{output}\"\n",
+            output = terminal_output_path.display()
+        ));
+        script.push_str("echo 'https://example.com/login?token=terminal-flow-test'\n");
+        script.push_str(&format!(
+            "touch \"{sentinel}\"\n",
+            sentinel = sentinel_path.display()
+        ));
+        script.push_str("sleep 2\n");
+        script
+    };
 
     let claude_path = temp.write_bin_executable("claude", &script_body);
-    let _env_guard = EnvVarGuard::set_var("TEST_CLAUDE_CLI_PATH", claude_path.to_string_lossy().to_string());
+    let _env_guard = EnvVarGuard::set_var(
+        "TEST_CLAUDE_CLI_PATH",
+        claude_path.to_string_lossy().to_string(),
+    );
 
     let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
     let harness = BridgeHarness::start(agent.clone()).await;
@@ -287,16 +340,25 @@ async fn auth_cli_login_handles_virtual_terminal_like_zed() {
         .get("result")
         .expect("auth/cli_login should start login process immediately");
     assert_eq!(result.get("status"), Some(&json!("started")));
+    let login_url = result
+        .get("loginUrl")
+        .and_then(|value| value.as_str())
+        .expect("auth/cli_login should surface a login URL");
+    let parsed = Url::parse(login_url).expect("loginUrl must be a valid URL");
+    assert_eq!(parsed.scheme(), "https", "expected https login url");
+    assert_eq!(parsed.domain(), Some("example.com"));
 
     // Verify the login process was spawned (like Zed's hidden terminal approach)
     wait_for_path(&sentinel_path).await;
 
     // Verify terminal output was captured (simulating Zed's monitoring)
     if terminal_output_path.exists() {
-        let output = fs::read_to_string(&terminal_output_path)
-            .expect("terminal output should be available");
-        assert!(output.contains("Login successful!"),
-            "terminal output should contain success message like Zed monitors");
+        let output =
+            fs::read_to_string(&terminal_output_path).expect("terminal output should be available");
+        assert!(
+            output.contains("Login successful!"),
+            "terminal output should contain success message like Zed monitors"
+        );
     }
 
     harness.shutdown().await;
@@ -312,14 +374,17 @@ async fn auth_cli_login_launches_claude_cli_from_path() {
     let args_path = temp.path().join("login-args.txt");
 
     let script_body = format!(
-        "#!/bin/sh\nPWD=`pwd`\necho \"$PWD\" > \"{cwd}\"\necho \"$@\" > \"{args}\"\ntouch \"{sentinel}\"\nsleep 1\n",
+        "#!/bin/sh\nPWD=`pwd`\necho \"$PWD\" > \"{cwd}\"\necho \"$@\" > \"{args}\"\necho 'https://example.com/login'\ntouch \"{sentinel}\"\nsleep 1\n",
         cwd = cwd_path.display(),
         args = args_path.display(),
         sentinel = sentinel_path.display()
     );
 
     let claude_path = temp.write_bin_executable("claude", &script_body);
-    let _env_guard = EnvVarGuard::set_var("TEST_CLAUDE_CLI_PATH", claude_path.to_string_lossy().to_string());
+    let _env_guard = EnvVarGuard::set_var(
+        "TEST_CLAUDE_CLI_PATH",
+        claude_path.to_string_lossy().to_string(),
+    );
 
     let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
     let harness = BridgeHarness::start(agent.clone()).await;
@@ -351,11 +416,17 @@ async fn auth_cli_login_launches_claude_cli_from_path() {
         .get("result")
         .expect("auth/cli_login should return a result payload when CLI launches");
     assert_eq!(result.get("status"), Some(&json!("started")));
+    let login_url = result
+        .get("loginUrl")
+        .and_then(|value| value.as_str())
+        .expect("auth/cli_login should surface a login URL");
+    let parsed = Url::parse(login_url).expect("loginUrl must be a valid URL");
+    assert_eq!(parsed.scheme(), "https", "expected https login url");
+    assert_eq!(parsed.domain(), Some("example.com"));
 
     wait_for_path(&sentinel_path).await;
 
-    let recorded_cwd = fs::read_to_string(&cwd_path)
-        .expect("stub should record working directory");
+    let recorded_cwd = fs::read_to_string(&cwd_path).expect("stub should record working directory");
     let expected_cwd = env::current_dir().expect("current dir available");
     assert_eq!(
         Path::new(recorded_cwd.trim()),
@@ -363,8 +434,7 @@ async fn auth_cli_login_launches_claude_cli_from_path() {
         "login CLI should run inside project root"
     );
 
-    let recorded_args = fs::read_to_string(&args_path)
-        .expect("stub should record arguments");
+    let recorded_args = fs::read_to_string(&args_path).expect("stub should record arguments");
     assert_eq!(
         recorded_args.trim(),
         "/login",
@@ -379,7 +449,7 @@ async fn auth_cli_login_launches_claude_cli_from_path() {
 async fn auth_cli_login_errors_when_cli_unavailable() {
     clean_auth_env();
     let temp = TestTempDir::new("auth-cli-login-missing-cli");
-    let bin_dir = temp.bin_path();
+    let _bin_dir = temp.bin_path();
     // Force failure for testing
     let _env_guard = EnvVarGuard::set_var("TEST_MODE_FAIL", "1".to_string());
 
@@ -417,7 +487,10 @@ async fn auth_cli_login_errors_when_cli_unavailable() {
         .get("code")
         .and_then(|code| code.as_i64())
         .expect("error response should include numeric code");
-    assert_eq!(error_code, -32000, "expected internal error code for missing CLI");
+    assert_eq!(
+        error_code, -32000,
+        "expected internal error code for missing CLI"
+    );
 
     let message = error
         .get("message")
@@ -440,13 +513,16 @@ async fn auth_cli_login_returns_immediately_before_process_completion() {
     let complete_sentinel = temp.path().join("process-completed");
 
     let script_body = format!(
-        "#!/bin/sh\ntouch \"{start}\"\nsleep 3\ntouch \"{complete}\"\n",
+        "#!/bin/sh\ntouch \"{start}\"\necho 'https://example.com/login'\nsleep 3\ntouch \"{complete}\"\n",
         start = start_sentinel.display(),
         complete = complete_sentinel.display()
     );
 
     let claude_path = temp.write_bin_executable("claude", &script_body);
-    let _env_guard = EnvVarGuard::set_var("TEST_CLAUDE_CLI_PATH", claude_path.to_string_lossy().to_string());
+    let _env_guard = EnvVarGuard::set_var(
+        "TEST_CLAUDE_CLI_PATH",
+        claude_path.to_string_lossy().to_string(),
+    );
 
     let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
     let harness = BridgeHarness::start(agent.clone()).await;
@@ -482,17 +558,29 @@ async fn auth_cli_login_returns_immediately_before_process_completion() {
         .get("result")
         .expect("auth/cli_login should return immediately");
     assert_eq!(result.get("status"), Some(&json!("started")));
+    let login_url = result
+        .get("loginUrl")
+        .and_then(|value| value.as_str())
+        .expect("auth/cli_login should surface a login URL");
+    let parsed = Url::parse(login_url).expect("loginUrl must be a valid URL");
+    assert_eq!(parsed.scheme(), "https", "expected https login url");
+    assert_eq!(parsed.domain(), Some("example.com"));
 
     // Response should be immediate (under 1 second), not wait for process completion
-    assert!(response_time.as_secs() < 1,
-        "auth/cli_login should return immediately, took {:?}", response_time);
+    assert!(
+        response_time.as_secs() < 1,
+        "auth/cli_login should return immediately, took {:?}",
+        response_time
+    );
 
     // Verify process was started
     wait_for_path(&start_sentinel).await;
 
     // Process should still be running (completion file shouldn't exist yet)
-    assert!(!complete_sentinel.exists(),
-        "login process should still be running after immediate response");
+    assert!(
+        !complete_sentinel.exists(),
+        "login process should still be running after immediate response"
+    );
 
     harness.shutdown().await;
 }
@@ -505,28 +593,35 @@ async fn auth_cli_login_resolves_package_from_workspace() {
 
     // Create a workspace structure with package.json that would pull claude-code-acp
     let package_json = temp.path().join("package.json");
-    fs::write(&package_json, r#"{
+    fs::write(
+        &package_json,
+        r#"{
         "name": "test-workspace",
         "private": true,
         "workspaces": ["packages/*"],
         "dependencies": {
             "@zed-industries/claude-code-acp": "^0.4.0"
         }
-    }"#).expect("create package.json");
+    }"#,
+    )
+    .expect("create package.json");
 
     // Create the expected node_modules structure
     let node_modules = temp.path().join("node_modules");
     let anthropic_dir = node_modules.join("@anthropic-ai").join("claude-code");
     fs::create_dir_all(&anthropic_dir).expect("create anthropic dir");
 
-    let zed_adapter_dir = node_modules.join("@zed-industries").join("claude-code-acp").join("dist");
+    let zed_adapter_dir = node_modules
+        .join("@zed-industries")
+        .join("claude-code-acp")
+        .join("dist");
     fs::create_dir_all(&zed_adapter_dir).expect("create zed adapter dir");
 
     let sentinel_path = temp.path().join("workspace-claude-invoked");
     let cli_js = anthropic_dir.join("cli.js");
 
     let script_body = format!(
-        "#!/usr/bin/env node\nconsole.log('Workspace Claude CLI');\nconst fs = require('fs');\nfs.writeFileSync('{}', 'workspace');\n",
+        "#!/usr/bin/env node\nconsole.log('Workspace Claude CLI');\nconsole.log('https://example.com/login');\nconst fs = require('fs');\nfs.writeFileSync('{}', 'workspace');\n",
         sentinel_path.display()
     );
 
@@ -536,7 +631,9 @@ async fn auth_cli_login_resolves_package_from_workspace() {
     // Change to the workspace directory
     let original_dir = env::current_dir().expect("get current dir");
     env::set_current_dir(temp.path()).expect("change to workspace dir");
-    let _dir_guard = DirGuard { original: original_dir };
+    let _dir_guard = DirGuard {
+        original: original_dir,
+    };
 
     let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
     let harness = BridgeHarness::start(agent.clone()).await;
@@ -568,8 +665,107 @@ async fn auth_cli_login_resolves_package_from_workspace() {
         .get("result")
         .expect("auth/cli_login should resolve Claude CLI from workspace");
     assert_eq!(result.get("status"), Some(&json!("started")));
+    let login_url = result
+        .get("loginUrl")
+        .and_then(|value| value.as_str())
+        .expect("auth/cli_login should surface a login URL");
+    let parsed = Url::parse(login_url).expect("loginUrl must be a valid URL");
+    assert_eq!(parsed.scheme(), "https", "expected https login url");
+    assert_eq!(parsed.domain(), Some("example.com"));
 
     wait_for_path(&sentinel_path).await;
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn auth_cli_login_extracts_login_url_from_real_cli() {
+    clean_auth_env();
+    let temp = TestTempDir::new("auth-cli-login-real-cli");
+
+    // Isolate CLI state to the temporary directory
+    let home_path = temp.path().join("home");
+    fs::create_dir_all(&home_path).expect("create temp home");
+    let _home_guard = EnvVarGuard::set_var("HOME", home_path.to_string_lossy().to_string());
+    let _xdg_guard =
+        EnvVarGuard::set_var("XDG_CONFIG_HOME", home_path.to_string_lossy().to_string());
+
+    // Prepare an npm workspace with the real Claude Code CLI
+    let mut npm_init = Command::new("npm");
+    npm_init.arg("init").arg("-y").current_dir(temp.path());
+    run_command(&mut npm_init, "npm init");
+    let mut npm_install = Command::new("npm");
+    npm_install
+        .arg("install")
+        .arg("@anthropic-ai/claude-code")
+        .current_dir(temp.path());
+    run_command(&mut npm_install, "npm install @anthropic-ai/claude-code");
+
+    // Create a thin wrapper that loads the real package and emits a login link
+    let cli_wrapper = temp.write_bin_executable(
+        "claude-wrapper",
+        "#!/usr/bin/env node\nrequire('@anthropic-ai/claude-code');\nconsole.log('Open https://example.com/login to authenticate.');\nsetTimeout(() => {}, 1000);\n",
+    );
+
+    // Ensure the bridge resolves our wrapper as the Claude CLI
+    let _cli_guard = EnvVarGuard::set_var(
+        "TEST_CLAUDE_CLI_PATH",
+        cli_wrapper.to_string_lossy().to_string(),
+    );
+
+    // Ensure npm binaries (and node) are discoverable for any child processes
+    let node_bin = temp.path().join("node_modules").join(".bin");
+    let _path_guard = EnvVarGuard::prepend_path(&node_bin);
+
+    // Prevent the CLI from trying to spawn a browser during tests
+    let _browser_guard = EnvVarGuard::set_var("BROWSER", "true".to_string());
+
+    // Run the bridge from the npm workspace so relative paths resolve correctly
+    let original_dir = env::current_dir().expect("current dir");
+    env::set_current_dir(temp.path()).expect("chdir to npm workspace");
+    let _dir_guard = DirGuard {
+        original: original_dir,
+    };
+
+    let agent = Arc::new(FakeAgentTransport::new(success_initialize_response()));
+    let harness = BridgeHarness::start(agent.clone()).await;
+
+    let (mut ws, _) = harness
+        .connect(ALLOWED_ORIGIN, Some(SUBPROTOCOL))
+        .await
+        .expect("handshake should succeed");
+
+    send_initialize_request(&mut ws).await;
+    let _init_response = next_message(&mut ws).await;
+
+    send_json_rpc(
+        &mut ws,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "auth-cli-login-real-cli",
+            "method": "auth/cli_login",
+            "params": Value::Null
+        }),
+    )
+    .await;
+
+    let message = next_message(&mut ws).await;
+    let payload = parse_json(&message);
+
+    assert_eq!(payload.get("id"), Some(&json!("auth-cli-login-real-cli")));
+    let result = payload
+        .get("result")
+        .expect("auth/cli_login should return a result payload when launching real CLI");
+
+    let login_url = result
+        .get("loginUrl")
+        .and_then(|value| value.as_str())
+        .expect("loginUrl should be returned when CLI outputs a login link");
+    assert!(
+        login_url.starts_with("https://"),
+        "login URL should start with https://, got {login_url}"
+    );
 
     harness.shutdown().await;
 }
@@ -596,16 +792,6 @@ impl EnvVarGuard {
         guard
     }
 
-    fn set_path(dir: &Path) -> Self {
-        let previous = env::var_os("PATH");
-        let guard = Self {
-            key: "PATH".to_string(),
-            previous,
-        };
-        env::set_var("PATH", dir);
-        guard
-    }
-
     fn set_var(key: &str, value: String) -> Self {
         let previous = env::var_os(key);
         let guard = Self {
@@ -613,16 +799,6 @@ impl EnvVarGuard {
             previous,
         };
         env::set_var(key, value);
-        guard
-    }
-
-    fn remove_var(key: &str) -> Self {
-        let previous = env::var_os(key);
-        let guard = Self {
-            key: key.to_string(),
-            previous,
-        };
-        env::remove_var(key);
         guard
     }
 }
@@ -714,6 +890,16 @@ async fn wait_for_path(path: &Path) {
         sleep(Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for path {path:?}");
+}
+
+fn run_command(command: &mut Command, description: &str) {
+    let status = command
+        .status()
+        .unwrap_or_else(|err| panic!("failed to execute {description}: {err}"));
+    assert!(
+        status.success(),
+        "{description} exited with status {status:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1123,7 +1309,6 @@ struct FakeAgentState {
 // Represents a session/prompt request that needs to be implemented
 #[derive(Clone, Debug)]
 struct PromptRequest {
-    session_id: String,
     prompt: String,
 }
 
@@ -1221,6 +1406,7 @@ struct FakeStreamingAgentTransport {
     state: Arc<Mutex<FakeStreamingAgentState>>,
 }
 
+#[allow(dead_code)]
 impl FakeStreamingAgentTransport {
     fn new(initialize_response: acp::InitializeResponse) -> Self {
         Self {
@@ -1305,7 +1491,6 @@ impl AgentTransport for FakeStreamingAgentTransport {
                 };
 
             guard.prompt_calls.push(PromptRequest {
-                session_id: request.session_id.0.to_string(),
                 prompt: prompt_text,
             });
 
@@ -1852,6 +2037,7 @@ struct FakePermissionAgentTransport {
     state: Arc<Mutex<FakePermissionAgentState>>,
 }
 
+#[allow(dead_code)]
 impl FakePermissionAgentTransport {
     fn new(initialize_response: acp::InitializeResponse) -> Self {
         Self {
