@@ -29,6 +29,7 @@ pub struct StdioAgentTransport {
     project_root: PathBuf,
     process: Arc<Mutex<Option<Child>>>,
     request_sender: Arc<Mutex<Option<mpsc::UnboundedSender<StdioRequest>>>>,
+    notification_sender: Arc<Mutex<Option<Arc<dyn NotificationSender>>>>,
     _task_handle: JoinHandle<()>,
 }
 
@@ -64,6 +65,8 @@ impl StdioAgentTransport {
         })?;
 
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<StdioRequest>();
+        let notification_sender = Arc::new(Mutex::new(None::<Arc<dyn NotificationSender>>));
+        let notification_sender_clone = notification_sender.clone();
 
         // Spawn task to handle stdio communication
         let task_handle = tokio::spawn(async move {
@@ -108,6 +111,7 @@ impl StdioAgentTransport {
                             Ok((_, line)) => {
                                 if let Ok(response) = serde_json::from_str::<Value>(&line) {
                                     if let Some(id) = response.get("id").and_then(|v| v.as_str()) {
+                                        // This is a response to a request
                                         if let Some(sender) = pending_requests.remove(id) {
                                             if let Some(result) = response.get("result") {
                                                 let _ = sender.send(Ok(result.clone()));
@@ -116,6 +120,14 @@ impl StdioAgentTransport {
                                                     .and_then(|m| m.as_str())
                                                     .unwrap_or("Unknown error");
                                                 let _ = sender.send(Err(AgentTransportError::Communication(error_msg.to_string())));
+                                            }
+                                        }
+                                    } else if let Some(method) = response.get("method").and_then(|m| m.as_str()) {
+                                        // This is a notification - forward it to the WebSocket client
+                                        if let Some(params) = response.get("params") {
+                                            let sender_guard = notification_sender.lock().await;
+                                            if let Some(ref sender) = *sender_guard {
+                                                let _ = sender.send_notification(method, params.clone()).await;
                                             }
                                         }
                                     }
@@ -134,6 +146,7 @@ impl StdioAgentTransport {
             project_root,
             process: Arc::new(Mutex::new(Some(child))),
             request_sender: Arc::new(Mutex::new(Some(request_tx))),
+            notification_sender: notification_sender_clone,
             _task_handle: task_handle,
         })
     }
@@ -233,12 +246,19 @@ impl AgentTransport for StdioAgentTransport {
     fn prompt(
         &self,
         request: acp::PromptRequest,
-        _notification_sender: Arc<dyn NotificationSender>,
+        notification_sender: Arc<dyn NotificationSender>,
     ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>> {
         let params = serde_json::to_value(request).unwrap_or(json!({}));
         let transport = self.request_sender.clone();
+        let notification_store = self.notification_sender.clone();
 
         async move {
+            // Store the notification sender for the stdio loop to use
+            {
+                let mut ns = notification_store.lock().await;
+                *ns = Some(notification_sender);
+            }
+
             let sender = transport.lock().await;
             let sender = sender.as_ref().ok_or_else(|| {
                 AgentTransportError::Communication("Transport not initialized".to_string())

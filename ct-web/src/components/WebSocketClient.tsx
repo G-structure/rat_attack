@@ -2,7 +2,7 @@ import { createSignal, createEffect, onCleanup } from 'solid-js';
 
 // ACP Types
 export interface InitializeRequest {
-  protocolVersion: string;
+  protocolVersion: number;
   clientCapabilities: {
     fs: {
       readTextFile: boolean;
@@ -13,11 +13,19 @@ export interface InitializeRequest {
 }
 
 export interface InitializeResponse {
-  protocolVersion: string;
+  protocolVersion: number;
   agentCapabilities: {
-    loadSession: boolean;
+    loadSession?: boolean;
+    promptCapabilities?: {
+      image?: boolean;
+      embeddedContext?: boolean;
+    };
+    mcpCapabilities?: {
+      http?: boolean;
+      sse?: boolean;
+    };
   };
-  authMethods: string[];
+  authMethods: any[];
   _meta?: {
     bridgeId?: string;
   };
@@ -82,6 +90,17 @@ export interface WebSocketClientProps {
   onMessage: (message: any) => void;
 }
 
+export interface SessionUpdateNotification {
+  method: 'session/update';
+  params: {
+    sessionId: string;
+    content: {
+      type: string;
+      text?: string;
+    };
+  };
+}
+
 export function createWebSocketClient() {
   const [ws, setWs] = createSignal<WebSocket | null>(null);
   const [connectionState, setConnectionState] = createSignal<ConnectionState>({
@@ -90,6 +109,7 @@ export function createWebSocketClient() {
 
   let requestId = 1;
   let connectUrl: string | null = null;
+  let notificationHandler: ((notification: any) => void) | null = null;
   const pendingRequests = new Map<string | number, {
     resolve: (value: any) => void;
     reject: (error: any) => void;
@@ -159,6 +179,9 @@ export function createWebSocketClient() {
         } else {
           // This is a notification
           console.log('Received notification:', message);
+          if (notificationHandler) {
+            notificationHandler(message);
+          }
         }
       } catch (error) {
         console.error('Failed to parse WebSocket message:', error);
@@ -217,7 +240,7 @@ export function createWebSocketClient() {
 
   const initialize = async (): Promise<InitializeResponse> => {
     const request: InitializeRequest = {
-      protocolVersion: '1.0.0',
+      protocolVersion: 1,
       clientCapabilities: {
         fs: {
           readTextFile: true,
@@ -267,6 +290,10 @@ export function createWebSocketClient() {
     setConnectionState({ status: 'disconnected' });
   };
 
+  const setNotificationHandler = (handler: ((notification: any) => void) | null) => {
+    notificationHandler = handler;
+  };
+
   return {
     connectionState,
     connect,
@@ -274,6 +301,7 @@ export function createWebSocketClient() {
     initialize,
     newSession,
     prompt,
-    sendRequest
+    sendRequest,
+    setNotificationHandler
   };
 }

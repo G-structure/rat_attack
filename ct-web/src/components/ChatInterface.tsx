@@ -25,6 +25,48 @@ export function ChatInterface() {
   // Auto-connect once on mount
   onMount(() => {
     wsClient.connect('ws://127.0.0.1:8137');
+
+    // Set up notification handler for streaming responses
+    wsClient.setNotificationHandler((notification) => {
+      console.log('Processing notification:', notification);
+      if (notification.method === 'session/update') {
+        const params = notification.params;
+        console.log('Notification params:', params);
+
+        // Handle different possible structures
+        if (params && typeof params === 'object') {
+          // Try different ways the notification might be structured
+          let sessionId = params.sessionId || params.session_id;
+          let textContent = null;
+
+          // Look for text content in various possible structures
+          if (params.update && params.update.content && params.update.content.text) {
+            textContent = params.update.content.text;
+          } else if (params.content) {
+            if (typeof params.content === 'string') {
+              textContent = params.content;
+            } else if (params.content.text) {
+              textContent = params.content.text;
+            }
+          } else if (params.text) {
+            textContent = params.text;
+          } else if (params.message) {
+            textContent = params.message;
+          }
+
+          if (sessionId === currentSession()?.id && textContent) {
+            addMessage('agent', textContent);
+          } else {
+            console.log('Notification received but not processed:', {
+              sessionId,
+              currentSessionId: currentSession()?.id,
+              textContent,
+              params
+            });
+          }
+        }
+      }
+    });
   });
 
   // Auto-initialize when connected (only when status changes to 'connected')
@@ -78,8 +120,7 @@ export function ChatInterface() {
 
     try {
       await wsClient.prompt(currentSession()!.id, text);
-      // For dummy agent, just add a simple response since it doesn't stream
-      addMessage('agent', `Echo: ${text}`);
+      // Response will be handled via session/update notifications
     } catch (error) {
       addMessage('system', `Error sending message: ${error}`);
     } finally {
