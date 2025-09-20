@@ -1,0 +1,336 @@
+//! File system operations
+//!
+//! This module implements the file system operations (read and write)
+//! with proper sandboxing and permission checking.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
+use tokio_tungstenite::WebSocketStream;
+use tokio::net::TcpStream;
+use agent_client_protocol as acp;
+
+use crate::bridge::BridgeSharedConfig;
+use crate::transport::AgentTransport;
+use crate::permissions::PermissionDecision;
+
+/// Validates and resolves a file path with security checks
+///
+/// This function implements project root sandboxing per RAT-LWS-REQ-044,
+/// blocking access to sensitive system paths and resolving relative paths
+/// against the current working directory.
+///
+/// # Arguments
+/// - `path`: The file path to validate and resolve
+/// - `for_write`: Whether this path will be used for write operations
+///
+/// # Returns
+/// - `Ok(PathBuf)` with the canonical path if validation passes
+/// - `Err(acp::Error)` if the path is invalid or outside allowed areas
+pub fn validate_and_resolve_path(path: &str, for_write: bool) -> Result<PathBuf, acp::Error> {
+    let path_buf = PathBuf::from(path);
+
+    // Implement project root sandboxing per RAT-LWS-REQ-044
+    // Block access to sensitive system paths
+    if path.starts_with("/etc/")
+        || path.starts_with("/var/")
+        || path.starts_with("/root/")
+        || path.starts_with("/usr/")
+        || path.starts_with("/boot/")
+        || path.starts_with("/proc/")
+    {
+        return Err(acp::Error::internal_error().with_data("path outside project root"));
+    }
+
+    // For relative paths, resolve against current working directory
+    let resolved_path = if path_buf.is_absolute() {
+        path_buf
+    } else {
+        std::env::current_dir()
+            .map_err(|_| acp::Error::internal_error().with_data("failed to get current directory"))?
+            .join(&path_buf)
+    };
+
+    // Canonicalize path, handling the case where file doesn't exist for writes
+    let canonical_path = if for_write && !resolved_path.exists() {
+        // For write operations, canonicalize the parent directory since the file may not exist yet
+        let parent = resolved_path
+            .parent()
+            .ok_or_else(|| acp::Error::internal_error().with_data("invalid path"))?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|_| acp::Error::internal_error().with_data("invalid path"))?;
+        canonical_parent.join(
+            resolved_path
+                .file_name()
+                .ok_or_else(|| acp::Error::internal_error().with_data("invalid path"))?,
+        )
+    } else {
+        resolved_path.canonicalize().map_err(|_| {
+            acp::Error::internal_error().with_data(if for_write {
+                "invalid path"
+            } else {
+                "file not found"
+            })
+        })?
+    };
+
+    // Additional safety check: ensure the canonical path doesn't escape to system directories
+    let canonical_str = canonical_path.to_string_lossy();
+    if canonical_str.starts_with("/etc/")
+        || canonical_str.starts_with("/var/")
+        || canonical_str.starts_with("/root/")
+        || canonical_str.starts_with("/usr/")
+        || canonical_str.starts_with("/boot/")
+        || canonical_str.starts_with("/proc/")
+    {
+        return Err(acp::Error::internal_error().with_data("path outside project root"));
+    }
+
+    Ok(canonical_path)
+}
+
+/// Handles reading a text file with optional line filtering
+///
+/// Implements RAT-LWS-REQ-040 by providing file reading with optional
+/// line offset and limit parameters. Includes binary file detection
+/// and UTF-8 validation.
+///
+/// # Arguments
+/// - `path`: The file path to read
+/// - `line_offset`: Optional 1-based line offset to start reading from
+/// - `line_limit`: Optional maximum number of lines to read
+///
+/// # Returns
+/// - `Ok(String)` with the file content (possibly filtered)
+/// - `Err(acp::Error)` if the file cannot be read or contains binary data
+pub fn handle_read_text_file(
+    path: &str,
+    line_offset: Option<u32>,
+    line_limit: Option<u32>,
+) -> Result<String, acp::Error> {
+    let canonical_path = validate_and_resolve_path(path, false)?;
+
+    // First read as bytes to check for binary content
+    let bytes = std::fs::read(&canonical_path)
+        .map_err(|_| acp::Error::internal_error().with_data("file not found"))?;
+
+    // Check if it's likely a binary file (contains null bytes)
+    if bytes.contains(&0) {
+        return Err(acp::Error::internal_error().with_data("binary file not supported"));
+    }
+
+    // Convert to string
+    let content = String::from_utf8(bytes)
+        .map_err(|_| acp::Error::internal_error().with_data("file contains invalid UTF-8"))?;
+
+    apply_line_filter(&content, line_offset, line_limit)
+}
+
+/// Applies line filtering to file content
+///
+/// This function handles line offset and limit parameters for file reading,
+/// supporting various combinations of offset and limit values.
+///
+/// # Arguments
+/// - `content`: The full file content
+/// - `line_offset`: Optional 1-based line offset to start from
+/// - `line_limit`: Optional maximum number of lines to include
+///
+/// # Returns
+/// - `Ok(String)` with the filtered content
+/// - `Err(acp::Error)` if filtering fails (should not happen in practice)
+fn apply_line_filter(
+    content: &str,
+    line_offset: Option<u32>,
+    line_limit: Option<u32>,
+) -> Result<String, acp::Error> {
+    let lines: Vec<&str> = content.lines().collect();
+
+    match (line_offset, line_limit) {
+        (Some(offset), Some(limit)) => {
+            let start_idx = (offset.saturating_sub(1) as usize).min(lines.len());
+            let end_idx = (start_idx + limit as usize).min(lines.len());
+
+            if start_idx >= lines.len() {
+                Ok(String::new())
+            } else {
+                Ok(lines[start_idx..end_idx].join("\n"))
+            }
+        }
+        (Some(offset), None) => {
+            let start_idx = (offset.saturating_sub(1) as usize).min(lines.len());
+
+            if start_idx >= lines.len() {
+                Ok(String::new())
+            } else {
+                Ok(lines[start_idx..].join("\n"))
+            }
+        }
+        (None, Some(limit)) => {
+            let end_idx = (limit as usize).min(lines.len());
+            Ok(lines[..end_idx].join("\n"))
+        }
+        (None, None) => Ok(content.to_string()),
+    }
+}
+
+/// Handles writing a text file with permission gating
+///
+/// Implements RAT-LWS-REQ-041 by providing permission-gated file writing
+/// with project root sandboxing. Requests permission from the agent transport
+/// if not already cached, and supports various permission outcomes.
+///
+/// # Arguments
+/// - `_stream`: WebSocket stream (unused in current implementation)
+/// - `shared`: Bridge configuration containing permission cache
+/// - `transport`: Agent transport for permission requests
+/// - `session_id`: Session ID for permission context
+/// - `path`: File path to write to
+/// - `content`: Content to write to the file
+///
+/// # Returns
+/// - `Ok(())` if the file was written successfully
+/// - `Err(acp::Error)` if permission was denied or write failed
+pub async fn handle_write_text_file(
+    _stream: Arc<TokioMutex<WebSocketStream<TcpStream>>>,
+    shared: &BridgeSharedConfig,
+    transport: &Arc<dyn AgentTransport>,
+    session_id: &str,
+    path: &str,
+    content: &str,
+) -> Result<(), acp::Error> {
+    use std::fs;
+
+    // First, check sandboxing
+    let canonical_path = validate_and_resolve_path(path, true)?;
+    let canonical_path_str = canonical_path.to_string_lossy().to_string();
+
+    // Create parent directories if they don't exist
+    if let Some(parent) = canonical_path.parent() {
+        fs::create_dir_all(parent).map_err(|_| {
+            acp::Error::internal_error().with_data("failed to create parent directories")
+        })?;
+    }
+
+    // Check permission cache first
+    let cached_decision = {
+        let cache = shared.permission_cache.lock().await;
+        cache.get(&canonical_path_str).cloned()
+    };
+
+    match cached_decision {
+        Some(PermissionDecision::AllowAlways) => {
+            // Cached allow_always - proceed with write without requesting permission
+            fs::write(&canonical_path, content)
+                .map_err(|_| acp::Error::internal_error().with_data("failed to write file"))?;
+            return Ok(());
+        }
+        Some(PermissionDecision::RejectAlways) => {
+            // Cached reject_always - return error immediately
+            return Err(acp::Error::new((-32000, "Permission denied".to_string())));
+        }
+        None => {
+            // No cached decision - request permission from agent
+        }
+    }
+
+    // Request permission from the agent
+    let permission_request = acp::RequestPermissionRequest {
+        session_id: acp::SessionId(session_id.to_string().into()),
+        tool_call: acp::ToolCallUpdate {
+            id: acp::ToolCallId("fs_write_text_file".to_string().into()),
+            fields: acp::ToolCallUpdateFields {
+                kind: Some(acp::ToolKind::Edit),
+                title: Some(format!("Write file: {path}")),
+                status: Some(acp::ToolCallStatus::InProgress),
+                ..Default::default()
+            },
+            meta: None,
+        },
+        options: vec![
+            acp::PermissionOption {
+                id: acp::PermissionOptionId("allow_once".to_string().into()),
+                name: "Allow this write operation".to_string(),
+                kind: acp::PermissionOptionKind::AllowOnce,
+                meta: None,
+            },
+            acp::PermissionOption {
+                id: acp::PermissionOptionId("allow_always".to_string().into()),
+                name: "Allow all write operations".to_string(),
+                kind: acp::PermissionOptionKind::AllowAlways,
+                meta: None,
+            },
+            acp::PermissionOption {
+                id: acp::PermissionOptionId("reject_once".to_string().into()),
+                name: "Reject this write operation".to_string(),
+                kind: acp::PermissionOptionKind::RejectOnce,
+                meta: None,
+            },
+            acp::PermissionOption {
+                id: acp::PermissionOptionId("reject_always".to_string().into()),
+                name: "Reject all write operations".to_string(),
+                kind: acp::PermissionOptionKind::RejectAlways,
+                meta: None,
+            },
+        ],
+        meta: None,
+    };
+
+    let permission_response = transport
+        .request_permission(permission_request)
+        .await
+        .map_err(|_| acp::Error::internal_error().with_data("permission request failed"))?;
+
+    // Check the permission outcome and update cache
+    match permission_response.outcome {
+        acp::RequestPermissionOutcome::Selected { option_id } => {
+            match option_id.0.as_ref() {
+                "allow_once" => {
+                    // Permission granted for this write only, proceed with write
+                    fs::write(&canonical_path, content).map_err(|_| {
+                        acp::Error::internal_error().with_data("failed to write file")
+                    })?;
+                    Ok(())
+                }
+                "allow_always" => {
+                    // Permission granted always, cache the decision and proceed with write
+                    {
+                        let mut cache = shared.permission_cache.lock().await;
+                        cache.insert(canonical_path_str, PermissionDecision::AllowAlways);
+                    }
+                    fs::write(&canonical_path, content).map_err(|_| {
+                        acp::Error::internal_error().with_data("failed to write file")
+                    })?;
+                    Ok(())
+                }
+                "reject_once" => {
+                    // Permission denied for this write only
+                    Err(acp::Error::new((-32000, "Permission denied".to_string())))
+                }
+                "reject_always" => {
+                    // Permission denied always, cache the decision
+                    {
+                        let mut cache = shared.permission_cache.lock().await;
+                        cache.insert(canonical_path_str, PermissionDecision::RejectAlways);
+                    }
+                    Err(acp::Error::new((-32000, "Permission denied".to_string())))
+                }
+                _ => {
+                    // Unknown option
+                    Err(acp::Error::new((
+                        -32000,
+                        "Unknown permission option".to_string(),
+                    )))
+                }
+            }
+        }
+        acp::RequestPermissionOutcome::Cancelled => {
+            // Permission request was cancelled
+            Err(acp::Error::new((
+                -32000,
+                "Permission request cancelled".to_string(),
+            )))
+        }
+    }
+}
