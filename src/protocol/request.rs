@@ -34,6 +34,7 @@ pub async fn handle_websocket_messages(
     shared: Arc<BridgeSharedConfig>,
     transport: Arc<dyn AgentTransport>,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+    tracing::info!("Starting WebSocket message processing loop");
     let stream = Arc::new(TokioMutex::new(stream));
     let mut initialized = false;
 
@@ -45,9 +46,11 @@ pub async fn handle_websocket_messages(
 
         match message {
             Some(Ok(Message::Text(text))) => {
+                tracing::debug!(message_len = text.len(), "Received text message");
                 let value: Value = match serde_json::from_str(&text) {
                     Ok(value) => value,
-                    Err(_) => {
+                    Err(err) => {
+                        tracing::warn!(error = %err, "Failed to parse JSON message");
                         let mut stream_guard = stream.lock().await;
                         send_error(&mut stream_guard, Value::Null, acp::Error::parse_error())
                             .await?;
@@ -58,9 +61,11 @@ pub async fn handle_websocket_messages(
                     .await?;
             }
             Some(Ok(Message::Binary(bytes))) => {
+                tracing::debug!(message_len = bytes.len(), "Received binary message");
                 let value: Value = match serde_json::from_slice(&bytes) {
                     Ok(value) => value,
-                    Err(_) => {
+                    Err(err) => {
+                        tracing::warn!(error = %err, "Failed to parse JSON from binary message");
                         let mut stream_guard = stream.lock().await;
                         send_error(&mut stream_guard, Value::Null, acp::Error::parse_error())
                             .await?;
@@ -71,11 +76,15 @@ pub async fn handle_websocket_messages(
                     .await?;
             }
             Some(Ok(Message::Ping(payload))) => {
+                tracing::trace!("Received ping, sending pong");
                 let mut stream_guard = stream.lock().await;
                 stream_guard.send(Message::Pong(payload)).await?;
             }
-            Some(Ok(Message::Pong(_))) => {}
+            Some(Ok(Message::Pong(_))) => {
+                tracing::trace!("Received pong");
+            }
             Some(Ok(Message::Close(_))) | None => {
+                tracing::info!("WebSocket connection closed");
                 break;
             }
             Some(Ok(Message::Frame(_))) => {}
@@ -112,8 +121,12 @@ async fn process_request(
     let method = value.get("method").and_then(|value| value.as_str());
 
     let method = match method {
-        Some(method) => method,
+        Some(method) => {
+            tracing::debug!(method = %method, request_id = ?id, "Processing ACP request");
+            method
+        },
         None => {
+            tracing::warn!(request_id = ?id, "Request missing method field");
             send_error_shared(&stream, id, acp::Error::invalid_request()).await?;
             return Ok(());
         }
@@ -125,6 +138,7 @@ async fn process_request(
         }
         "session/new" => {
             if !*initialized {
+                tracing::warn!(method = %method, "Method called before initialization");
                 let error = acp::Error::method_not_found();
                 send_error_shared(&stream, id, error).await?;
                 return Ok(());
@@ -133,6 +147,7 @@ async fn process_request(
         }
         "session/prompt" => {
             if !*initialized {
+                tracing::warn!(method = %method, "Method called before initialization");
                 let error = acp::Error::method_not_found();
                 send_error_shared(&stream, id, error).await?;
                 return Ok(());
@@ -141,6 +156,7 @@ async fn process_request(
         }
         "fs/read_text_file" => {
             if !*initialized {
+                tracing::warn!(method = %method, "Method called before initialization");
                 let error = acp::Error::method_not_found();
                 send_error_shared(&stream, id, error).await?;
                 return Ok(());
@@ -149,6 +165,7 @@ async fn process_request(
         }
         "fs/write_text_file" => {
             if !*initialized {
+                tracing::warn!(method = %method, "Method called before initialization");
                 let error = acp::Error::method_not_found();
                 send_error_shared(&stream, id, error).await?;
                 return Ok(());
@@ -159,6 +176,7 @@ async fn process_request(
             handle_auth_cli_login(stream, id).await?;
         }
         _ => {
+            tracing::warn!(method = %method, "Unknown ACP method");
             let error = acp::Error::method_not_found();
             send_error_shared(&stream, id, error).await?;
         }
@@ -179,10 +197,15 @@ async fn handle_initialize(
     value: Value,
     initialized: &mut bool,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+    tracing::info!(request_id = ?id, "Processing initialize request");
     let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
-    let request: acp::InitializeRequest = match serde_json::from_value(params) {
-        Ok(request) => request,
+    let request: acp::InitializeRequest = match serde_json::from_value::<acp::InitializeRequest>(params) {
+        Ok(request) => {
+            tracing::debug!(client_capabilities = ?request.client_capabilities, "Initialize request parsed");
+            request
+        },
         Err(err) => {
+            tracing::warn!(error = %err, "Invalid initialize request parameters");
             send_error_shared(
                 &stream,
                 id,
@@ -197,12 +220,14 @@ async fn handle_initialize(
     match response {
         Ok(mut response) => {
             ensure_bridge_meta(&mut response, &shared.bridge_id);
+            tracing::info!(bridge_id = %shared.bridge_id, "Bridge initialization successful");
             let result = serde_json::to_value(response)
                 .map_err(|err| tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(err)))?;
             send_result_shared(&stream, id, result).await?;
             *initialized = true;
         }
         Err(err) => {
+            tracing::error!(error = ?err, "Bridge initialization failed");
             let error = err.into_rpc_error();
             send_error_shared(&stream, id, error).await?;
         }

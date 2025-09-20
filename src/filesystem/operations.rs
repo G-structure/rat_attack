@@ -28,6 +28,7 @@ use crate::permissions::PermissionDecision;
 /// - `Ok(PathBuf)` with the canonical path if validation passes
 /// - `Err(acp::Error)` if the path is invalid or outside allowed areas
 pub fn validate_and_resolve_path(path: &str, for_write: bool) -> Result<PathBuf, acp::Error> {
+    tracing::debug!(path = %path, for_write = %for_write, "Validating file path");
     let path_buf = PathBuf::from(path);
 
     // Implement project root sandboxing per RAT-LWS-REQ-044
@@ -39,6 +40,7 @@ pub fn validate_and_resolve_path(path: &str, for_write: bool) -> Result<PathBuf,
         || path.starts_with("/boot/")
         || path.starts_with("/proc/")
     {
+        tracing::warn!(path = %path, "Path access blocked - outside project root");
         return Err(acp::Error::internal_error().with_data("path outside project root"));
     }
 
@@ -109,21 +111,30 @@ pub fn handle_read_text_file(
     line_offset: Option<u32>,
     line_limit: Option<u32>,
 ) -> Result<String, acp::Error> {
+    tracing::info!(path = %path, line_offset = ?line_offset, line_limit = ?line_limit, "Reading text file");
     let canonical_path = validate_and_resolve_path(path, false)?;
 
     // First read as bytes to check for binary content
     let bytes = std::fs::read(&canonical_path)
-        .map_err(|_| acp::Error::internal_error().with_data("file not found"))?;
+        .map_err(|err| {
+            tracing::warn!(path = %canonical_path.display(), error = %err, "Failed to read file");
+            acp::Error::internal_error().with_data("file not found")
+        })?;
 
     // Check if it's likely a binary file (contains null bytes)
     if bytes.contains(&0) {
+        tracing::warn!(path = %canonical_path.display(), "Binary file detected");
         return Err(acp::Error::internal_error().with_data("binary file not supported"));
     }
 
     // Convert to string
     let content = String::from_utf8(bytes)
-        .map_err(|_| acp::Error::internal_error().with_data("file contains invalid UTF-8"))?;
+        .map_err(|err| {
+            tracing::warn!(path = %canonical_path.display(), error = %err, "File contains invalid UTF-8");
+            acp::Error::internal_error().with_data("file contains invalid UTF-8")
+        })?;
 
+    tracing::debug!(path = %canonical_path.display(), content_len = content.len(), "File read successfully");
     apply_line_filter(&content, line_offset, line_limit)
 }
 
@@ -201,6 +212,8 @@ pub async fn handle_write_text_file(
     content: &str,
 ) -> Result<(), acp::Error> {
     use std::fs;
+
+    tracing::info!(path = %path, session_id = %session_id, content_len = content.len(), "Writing text file");
 
     // First, check sandboxing
     let canonical_path = validate_and_resolve_path(path, true)?;

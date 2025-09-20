@@ -42,8 +42,10 @@ pub fn serve(
             bridge_id,
         } = config;
 
+        tracing::info!(bind_addr = %bind_addr, bridge_id = %bridge_id, "Starting bridge server");
         let listener = TcpListener::bind(bind_addr).await?;
         let local_addr = listener.local_addr()?;
+        tracing::debug!(local_addr = %local_addr, "TCP listener bound successfully");
 
         let shared = Arc::new(BridgeSharedConfig::new(BridgeConfig {
             bind_addr,
@@ -57,6 +59,7 @@ pub fn serve(
         let join_handle =
             spawn_accept_loop(listener, shutdown_rx, shared.clone(), transport.clone());
 
+        tracing::info!("Bridge server started successfully");
         Ok(BridgeHandle::new(local_addr, shutdown_tx, join_handle))
     })
 }
@@ -81,30 +84,42 @@ fn spawn_accept_loop(
     transport: Arc<dyn AgentTransport>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        tracing::debug!("Accept loop started");
         loop {
             tokio::select! {
                 _ = &mut shutdown_rx => {
+                    tracing::info!("Shutdown signal received, stopping accept loop");
                     break;
                 }
                 accept_result = listener.accept() => {
-                    let (stream, _) = match accept_result {
+                    let (stream, peer_addr) = match accept_result {
                         Ok(pair) => pair,
-                        Err(_) => break,
+                        Err(err) => {
+                            tracing::error!(error = %err, "Failed to accept connection");
+                            break;
+                        }
                     };
+                    tracing::debug!(peer_addr = %peer_addr, "New client connection");
                     let shared = shared.clone();
                     let transport = transport.clone();
                     tokio::spawn(async move {
                         if let Err(err) = handle_client(stream, shared, transport).await {
                             match err {
-                                ClientError::Handshake(error) | ClientError::WebSocket(error) => {
-                                    drop(error); // TODO: replace with structured logging
+                                ClientError::Handshake(error) => {
+                                    tracing::warn!(peer_addr = %peer_addr, error = %error, "WebSocket handshake failed");
+                                }
+                                ClientError::WebSocket(error) => {
+                                    tracing::warn!(peer_addr = %peer_addr, error = %error, "WebSocket communication error");
                                 }
                             }
+                        } else {
+                            tracing::debug!(peer_addr = %peer_addr, "Client disconnected cleanly");
                         }
                     });
                 }
             }
         }
+        tracing::debug!("Accept loop finished");
     })
 }
 
@@ -135,9 +150,11 @@ async fn handle_client(
     shared: Arc<BridgeSharedConfig>,
     transport: Arc<dyn AgentTransport>,
 ) -> Result<(), ClientError> {
+    tracing::debug!("Starting WebSocket handshake");
     let ws_stream = accept_client(stream, shared.clone())
         .await
         .map_err(ClientError::Handshake)?;
+    tracing::debug!("WebSocket handshake completed, starting message processing");
     handle_websocket(ws_stream, shared, transport)
         .await
         .map_err(ClientError::WebSocket)

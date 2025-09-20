@@ -8,9 +8,13 @@ use agent_client_protocol as acp;
 
 pub mod error;
 pub mod notification;
+pub mod dummy;
+pub mod stdio;
 
 pub use error::AgentTransportError;
 pub use notification::{NotificationSender, WebSocketNotificationSender};
+pub use dummy::DummyAgentTransport;
+pub use stdio::StdioAgentTransport;
 
 /// Trait for agent transport implementations
 ///

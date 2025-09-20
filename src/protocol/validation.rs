@@ -25,6 +25,7 @@ pub fn validate_origin(request: &Request, allowed_origins: &[String]) -> Result<
         .headers()
         .get(ORIGIN)
         .and_then(|value| value.to_str().ok());
+
     match origin {
         Some(origin_value)
             if allowed_origins

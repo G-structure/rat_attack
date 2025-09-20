@@ -17,6 +17,10 @@ pub enum AgentTransportError {
     Internal(String),
     /// Requested functionality is not implemented
     NotImplemented,
+    /// Failed to spawn or communicate with agent process
+    ProcessSpawn(String),
+    /// Communication error with agent
+    Communication(String),
 }
 
 impl From<acp::Error> for AgentTransportError {
@@ -38,6 +42,12 @@ impl AgentTransportError {
             }
             AgentTransportError::NotImplemented => {
                 acp::Error::internal_error().with_data("agent transport not implemented")
+            }
+            AgentTransportError::ProcessSpawn(message) => {
+                acp::Error::internal_error().with_data(format!("process spawn error: {}", message))
+            }
+            AgentTransportError::Communication(message) => {
+                acp::Error::internal_error().with_data(format!("communication error: {}", message))
             }
         }
     }

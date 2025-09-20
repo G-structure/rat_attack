@@ -13,6 +13,8 @@ pub enum BridgeError {
     Io(std::io::Error),
     /// Error from background task execution
     Task(tokio::task::JoinError),
+    /// Error from agent transport layer
+    Transport(crate::transport::AgentTransportError),
 }
 
 impl From<std::io::Error> for BridgeError {
@@ -24,6 +26,12 @@ impl From<std::io::Error> for BridgeError {
 impl From<tokio::task::JoinError> for BridgeError {
     fn from(value: tokio::task::JoinError) -> Self {
         BridgeError::Task(value)
+    }
+}
+
+impl From<crate::transport::AgentTransportError> for BridgeError {
+    fn from(value: crate::transport::AgentTransportError) -> Self {
+        BridgeError::Transport(value)
     }
 }
 

@@ -42,6 +42,7 @@
 pub mod bridge;
 pub mod transport;
 pub mod protocol;
+pub mod logging;
 
 // Feature modules
 pub mod filesystem;
@@ -50,8 +51,9 @@ pub mod permissions;
 
 // Re-exports for public API
 pub use bridge::{BridgeConfig, BridgeHandle, BridgeError, serve};
-pub use transport::{AgentTransport, AgentTransportError, NotificationSender, WebSocketNotificationSender};
+pub use transport::{AgentTransport, AgentTransportError, NotificationSender, WebSocketNotificationSender, DummyAgentTransport, StdioAgentTransport};
 pub use permissions::{PermissionDecision, PermissionCache};
+pub use logging::init_logging;
 
 // Internal re-exports for backward compatibility during refactoring
 // These maintain the existing public interface while code is being modularized
