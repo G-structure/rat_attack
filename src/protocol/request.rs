@@ -4,17 +4,17 @@
 //! received over WebSocket connections. It implements the main message loop
 //! and dispatches requests to appropriate handlers.
 
-use std::sync::Arc;
+use agent_client_protocol as acp;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_tungstenite::{tungstenite::protocol::Message, WebSocketStream};
-use tokio::net::TcpStream;
-use futures_util::{SinkExt, StreamExt};
-use agent_client_protocol as acp;
 
 use crate::bridge::BridgeSharedConfig;
+use crate::protocol::{send_error, send_error_shared, send_result_shared};
 use crate::transport::{AgentTransport, WebSocketNotificationSender};
-use crate::protocol::{send_error, send_result_shared, send_error_shared};
 
 /// Handles WebSocket message processing for a connected client
 ///
@@ -36,6 +36,7 @@ pub async fn handle_websocket_messages(
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
     tracing::info!("Starting WebSocket message processing loop");
     let stream = Arc::new(TokioMutex::new(stream));
+    let notification_sender = Arc::new(WebSocketNotificationSender::new(stream.clone()));
     let mut initialized = false;
 
     loop {
@@ -57,8 +58,15 @@ pub async fn handle_websocket_messages(
                         continue;
                     }
                 };
-                process_request(stream.clone(), &shared, &transport, &mut initialized, value)
-                    .await?;
+                process_request(
+                    stream.clone(),
+                    &shared,
+                    &transport,
+                    &notification_sender,
+                    &mut initialized,
+                    value,
+                )
+                .await?;
             }
             Some(Ok(Message::Binary(bytes))) => {
                 tracing::debug!(message_len = bytes.len(), "Received binary message");
@@ -72,8 +80,15 @@ pub async fn handle_websocket_messages(
                         continue;
                     }
                 };
-                process_request(stream.clone(), &shared, &transport, &mut initialized, value)
-                    .await?;
+                process_request(
+                    stream.clone(),
+                    &shared,
+                    &transport,
+                    &notification_sender,
+                    &mut initialized,
+                    value,
+                )
+                .await?;
             }
             Some(Ok(Message::Ping(payload))) => {
                 tracing::trace!("Received ping, sending pong");
@@ -104,6 +119,7 @@ pub async fn handle_websocket_messages(
 /// - `stream`: Shared WebSocket stream for sending responses
 /// - `shared`: Bridge configuration and shared state
 /// - `transport`: Agent transport for handling requests
+/// - `notification_sender`: Notification sender for bidirectional communication
 /// - `initialized`: Whether the connection has been initialized
 /// - `value`: The parsed JSON-RPC request
 ///
@@ -114,19 +130,35 @@ async fn process_request(
     stream: Arc<TokioMutex<WebSocketStream<TcpStream>>>,
     shared: &BridgeSharedConfig,
     transport: &Arc<dyn AgentTransport>,
+    notification_sender: &Arc<WebSocketNotificationSender>,
     initialized: &mut bool,
     value: Value,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
     let id = value.get("id").cloned().unwrap_or(Value::Null);
     let method = value.get("method").and_then(|value| value.as_str());
 
+    // Check if this is a response (has id but no method)
+    if method.is_none() && !id.is_null() {
+        // This is a response to a request we sent, route it to the notification sender
+        tracing::debug!(request_id = ?id, "Received response, routing to notification sender");
+        notification_sender
+            .handle_response(value)
+            .await
+            .map_err(|_| {
+                tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(
+                    "Failed to handle response",
+                ))
+            })?;
+        return Ok(());
+    }
+
     let method = match method {
         Some(method) => {
             tracing::debug!(method = %method, request_id = ?id, "Processing ACP request");
             method
-        },
+        }
         None => {
-            tracing::warn!(request_id = ?id, "Request missing method field");
+            tracing::warn!(request_id = ?id, "Message missing method field");
             send_error_shared(&stream, id, acp::Error::invalid_request()).await?;
             return Ok(());
         }
@@ -152,7 +184,7 @@ async fn process_request(
                 send_error_shared(&stream, id, error).await?;
                 return Ok(());
             }
-            handle_session_prompt(stream, transport, id, value).await?;
+            handle_session_prompt(stream, transport, notification_sender, id, value).await?;
         }
         "fs/read_text_file" => {
             if !*initialized {
@@ -161,7 +193,7 @@ async fn process_request(
                 send_error_shared(&stream, id, error).await?;
                 return Ok(());
             }
-            handle_fs_read_text_file(stream, id, value).await?;
+            handle_fs_read_text_file(stream, shared, id, value).await?;
         }
         "fs/write_text_file" => {
             if !*initialized {
@@ -199,11 +231,13 @@ async fn handle_initialize(
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
     tracing::info!(request_id = ?id, "Processing initialize request");
     let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
-    let request: acp::InitializeRequest = match serde_json::from_value::<acp::InitializeRequest>(params) {
+    let request: acp::InitializeRequest = match serde_json::from_value::<acp::InitializeRequest>(
+        params,
+    ) {
         Ok(request) => {
             tracing::debug!(client_capabilities = ?request.client_capabilities, "Initialize request parsed");
             request
-        },
+        }
         Err(err) => {
             tracing::warn!(error = %err, "Invalid initialize request parameters");
             send_error_shared(
@@ -221,8 +255,9 @@ async fn handle_initialize(
         Ok(mut response) => {
             ensure_bridge_meta(&mut response, &shared.bridge_id);
             tracing::info!(bridge_id = %shared.bridge_id, "Bridge initialization successful");
-            let result = serde_json::to_value(response)
-                .map_err(|err| tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(err)))?;
+            let result = serde_json::to_value(response).map_err(|err| {
+                tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(err))
+            })?;
             send_result_shared(&stream, id, result).await?;
             *initialized = true;
         }
@@ -259,8 +294,9 @@ async fn handle_session_new(
     let response = transport.new_session(request).await;
     match response {
         Ok(response) => {
-            let result = serde_json::to_value(response)
-                .map_err(|err| tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(err)))?;
+            let result = serde_json::to_value(response).map_err(|err| {
+                tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(err))
+            })?;
             send_result_shared(&stream, id, result).await?;
         }
         Err(err) => {
@@ -278,6 +314,7 @@ async fn handle_session_new(
 async fn handle_session_prompt(
     stream: Arc<TokioMutex<WebSocketStream<TcpStream>>>,
     transport: &Arc<dyn AgentTransport>,
+    notification_sender: &Arc<WebSocketNotificationSender>,
     id: Value,
     value: Value,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
@@ -301,12 +338,12 @@ async fn handle_session_prompt(
         meta: None,
     };
 
-    let notification_sender = Arc::new(WebSocketNotificationSender::new(stream.clone()));
-    let response = transport.prompt(request, notification_sender).await;
+    let response = transport.prompt(request, notification_sender.clone()).await;
     match response {
         Ok(response) => {
-            let result = serde_json::to_value(response)
-                .map_err(|err| tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(err)))?;
+            let result = serde_json::to_value(response).map_err(|err| {
+                tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(err))
+            })?;
             send_result_shared(&stream, id, result).await?;
         }
         Err(err) => {
@@ -323,6 +360,7 @@ async fn handle_session_prompt(
 /// line offset and limit parameters.
 async fn handle_fs_read_text_file(
     stream: Arc<TokioMutex<WebSocketStream<TcpStream>>>,
+    shared: &BridgeSharedConfig,
     id: Value,
     value: Value,
 ) -> Result<(), tokio_tungstenite::tungstenite::Error> {
@@ -354,7 +392,7 @@ async fn handle_fs_read_text_file(
         .and_then(|v| v.as_u64())
         .map(|v| v as u32);
 
-    match handle_read_text_file(path, line_offset, line_limit) {
+    match handle_read_text_file(path, &shared.project_root, line_offset, line_limit) {
         Ok(content) => {
             let result = json!({
                 "content": content
@@ -390,8 +428,7 @@ async fn handle_fs_write_text_file(
             send_error_shared(
                 &stream,
                 id,
-                acp::Error::invalid_params()
-                    .with_data("missing or invalid sessionId parameter"),
+                acp::Error::invalid_params().with_data("missing or invalid sessionId parameter"),
             )
             .await?;
             return Ok(());
@@ -417,23 +454,14 @@ async fn handle_fs_write_text_file(
             send_error_shared(
                 &stream,
                 id,
-                acp::Error::invalid_params()
-                    .with_data("missing or invalid content parameter"),
+                acp::Error::invalid_params().with_data("missing or invalid content parameter"),
             )
             .await?;
             return Ok(());
         }
     };
 
-    match handle_write_text_file(
-        stream.clone(),
-        shared,
-        transport,
-        session_id,
-        path,
-        content,
-    )
-    .await
+    match handle_write_text_file(stream.clone(), shared, transport, session_id, path, content).await
     {
         Ok(_) => {
             let result = json!({});

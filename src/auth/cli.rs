@@ -3,15 +3,15 @@
 //! This module handles authentication via the Claude CLI, including process spawning,
 //! PTY management, and login URL extraction.
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use agent_client_protocol as acp;
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use agent_client_protocol as acp;
 
 // Global mutex to serialize CLI resolution during tests to prevent env var races
 static CLI_RESOLUTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();

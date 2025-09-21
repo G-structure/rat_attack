@@ -3,36 +3,45 @@
 //! This module implements the file system operations (read and write)
 //! with proper sandboxing and permission checking.
 
-use std::path::PathBuf;
+use agent_client_protocol as acp;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_tungstenite::WebSocketStream;
-use tokio::net::TcpStream;
-use agent_client_protocol as acp;
 
 use crate::bridge::BridgeSharedConfig;
-use crate::transport::AgentTransport;
 use crate::permissions::PermissionDecision;
+use crate::transport::AgentTransport;
 
 /// Validates and resolves a file path with security checks
 ///
 /// This function implements project root sandboxing per RAT-LWS-REQ-044,
 /// blocking access to sensitive system paths and resolving relative paths
-/// against the current working directory.
+/// against the configured project root.
 ///
 /// # Arguments
 /// - `path`: The file path to validate and resolve
+/// - `project_root`: The configured project root for sandboxing
 /// - `for_write`: Whether this path will be used for write operations
 ///
 /// # Returns
 /// - `Ok(PathBuf)` with the canonical path if validation passes
 /// - `Err(acp::Error)` if the path is invalid or outside allowed areas
-pub fn validate_and_resolve_path(path: &str, for_write: bool) -> Result<PathBuf, acp::Error> {
-    tracing::debug!(path = %path, for_write = %for_write, "Validating file path");
+pub fn validate_and_resolve_path(
+    path: &str,
+    project_root: &Path,
+    for_write: bool,
+) -> Result<PathBuf, acp::Error> {
+    tracing::debug!(path = %path, for_write = %for_write, project_root = %project_root.display(), "Validating file path");
+
+    let project_root = project_root.canonicalize().map_err(|_| {
+        acp::Error::internal_error().with_data("failed to canonicalize project root")
+    })?;
+
     let path_buf = PathBuf::from(path);
 
-    // Implement project root sandboxing per RAT-LWS-REQ-044
-    // Block access to sensitive system paths
+    // Block access to sensitive system paths (additional safety)
     if path.starts_with("/etc/")
         || path.starts_with("/var/")
         || path.starts_with("/root/")
@@ -40,44 +49,61 @@ pub fn validate_and_resolve_path(path: &str, for_write: bool) -> Result<PathBuf,
         || path.starts_with("/boot/")
         || path.starts_with("/proc/")
     {
-        tracing::warn!(path = %path, "Path access blocked - outside project root");
+        tracing::warn!(path = %path, "Path access blocked - sensitive system path");
         return Err(acp::Error::internal_error().with_data("path outside project root"));
     }
 
-    // For relative paths, resolve against current working directory
+    // For relative paths, resolve against project root
     let resolved_path = if path_buf.is_absolute() {
         path_buf
     } else {
-        std::env::current_dir()
-            .map_err(|_| acp::Error::internal_error().with_data("failed to get current directory"))?
-            .join(&path_buf)
+        project_root.clone().join(&path_buf)
     };
 
     // Canonicalize path, handling the case where file doesn't exist for writes
-    let canonical_path = if for_write && !resolved_path.exists() {
-        // For write operations, canonicalize the parent directory since the file may not exist yet
+    let canonical_path = if for_write {
+        // For write operations, validate the parent directory since the file may not exist yet
         let parent = resolved_path
             .parent()
             .ok_or_else(|| acp::Error::internal_error().with_data("invalid path"))?;
         let canonical_parent = parent
             .canonicalize()
-            .map_err(|_| acp::Error::internal_error().with_data("invalid path"))?;
-        canonical_parent.join(
-            resolved_path
-                .file_name()
-                .ok_or_else(|| acp::Error::internal_error().with_data("invalid path"))?,
-        )
+            .map_err(|_| acp::Error::internal_error().with_data("invalid parent path"))?;
+
+        // Ensure parent is within project root
+        if !canonical_parent.starts_with(&project_root) {
+            tracing::warn!(path = %path, parent = %canonical_parent.display(), "Path access blocked - parent outside project root");
+            return Err(acp::Error::internal_error().with_data("path outside project root"));
+        }
+
+        let file_name = resolved_path
+            .file_name()
+            .ok_or_else(|| acp::Error::internal_error().with_data("invalid path"))?;
+        let full_path = canonical_parent.join(file_name);
+
+        // Ensure full path is within project root
+        if !full_path.starts_with(&project_root) {
+            tracing::warn!(path = %path, full_path = %full_path.display(), "Path access blocked - full path outside project root");
+            return Err(acp::Error::internal_error().with_data("path outside project root"));
+        }
+
+        full_path
     } else {
-        resolved_path.canonicalize().map_err(|_| {
-            acp::Error::internal_error().with_data(if for_write {
-                "invalid path"
-            } else {
-                "file not found"
-            })
-        })?
+        // For reads, canonicalize the full path (file must exist)
+        let canonical = resolved_path
+            .canonicalize()
+            .map_err(|_| acp::Error::internal_error().with_data("file not found"))?;
+
+        // Ensure full path is within project root
+        if !canonical.starts_with(&project_root) {
+            tracing::warn!(path = %path, canonical = %canonical.display(), "Path access blocked - outside project root");
+            return Err(acp::Error::internal_error().with_data("path outside project root"));
+        }
+
+        canonical
     };
 
-    // Additional safety check: ensure the canonical path doesn't escape to system directories
+    // Additional safety check on the final canonical path
     let canonical_str = canonical_path.to_string_lossy();
     if canonical_str.starts_with("/etc/")
         || canonical_str.starts_with("/var/")
@@ -86,9 +112,11 @@ pub fn validate_and_resolve_path(path: &str, for_write: bool) -> Result<PathBuf,
         || canonical_str.starts_with("/boot/")
         || canonical_str.starts_with("/proc/")
     {
+        tracing::warn!(path = %path, "Path access blocked - resolved to sensitive system path");
         return Err(acp::Error::internal_error().with_data("path outside project root"));
     }
 
+    tracing::debug!(original_path = %path, canonical_path = %canonical_path.display(), "Path validated successfully");
     Ok(canonical_path)
 }
 
@@ -100,6 +128,7 @@ pub fn validate_and_resolve_path(path: &str, for_write: bool) -> Result<PathBuf,
 ///
 /// # Arguments
 /// - `path`: The file path to read
+/// - `project_root`: The configured project root for sandboxing
 /// - `line_offset`: Optional 1-based line offset to start reading from
 /// - `line_limit`: Optional maximum number of lines to read
 ///
@@ -108,18 +137,18 @@ pub fn validate_and_resolve_path(path: &str, for_write: bool) -> Result<PathBuf,
 /// - `Err(acp::Error)` if the file cannot be read or contains binary data
 pub fn handle_read_text_file(
     path: &str,
+    project_root: &Path,
     line_offset: Option<u32>,
     line_limit: Option<u32>,
 ) -> Result<String, acp::Error> {
     tracing::info!(path = %path, line_offset = ?line_offset, line_limit = ?line_limit, "Reading text file");
-    let canonical_path = validate_and_resolve_path(path, false)?;
+    let canonical_path = validate_and_resolve_path(path, project_root, false)?;
 
     // First read as bytes to check for binary content
-    let bytes = std::fs::read(&canonical_path)
-        .map_err(|err| {
-            tracing::warn!(path = %canonical_path.display(), error = %err, "Failed to read file");
-            acp::Error::internal_error().with_data("file not found")
-        })?;
+    let bytes = std::fs::read(&canonical_path).map_err(|err| {
+        tracing::warn!(path = %canonical_path.display(), error = %err, "Failed to read file");
+        acp::Error::internal_error().with_data("file not found")
+    })?;
 
     // Check if it's likely a binary file (contains null bytes)
     if bytes.contains(&0) {
@@ -157,33 +186,22 @@ fn apply_line_filter(
     line_limit: Option<u32>,
 ) -> Result<String, acp::Error> {
     let lines: Vec<&str> = content.lines().collect();
+    let mut filtered_lines = lines.as_slice();
 
-    match (line_offset, line_limit) {
-        (Some(offset), Some(limit)) => {
-            let start_idx = (offset.saturating_sub(1) as usize).min(lines.len());
-            let end_idx = (start_idx + limit as usize).min(lines.len());
-
-            if start_idx >= lines.len() {
-                Ok(String::new())
-            } else {
-                Ok(lines[start_idx..end_idx].join("\n"))
-            }
+    if let Some(offset) = line_offset {
+        let start_idx = (offset.saturating_sub(1) as usize).min(filtered_lines.len());
+        if start_idx >= filtered_lines.len() {
+            return Ok(String::new());
         }
-        (Some(offset), None) => {
-            let start_idx = (offset.saturating_sub(1) as usize).min(lines.len());
-
-            if start_idx >= lines.len() {
-                Ok(String::new())
-            } else {
-                Ok(lines[start_idx..].join("\n"))
-            }
-        }
-        (None, Some(limit)) => {
-            let end_idx = (limit as usize).min(lines.len());
-            Ok(lines[..end_idx].join("\n"))
-        }
-        (None, None) => Ok(content.to_string()),
+        filtered_lines = &filtered_lines[start_idx..];
     }
+
+    if let Some(limit) = line_limit {
+        let end_idx = (limit as usize).min(filtered_lines.len());
+        filtered_lines = &filtered_lines[..end_idx];
+    }
+
+    Ok(filtered_lines.join("\n"))
 }
 
 /// Handles writing a text file with permission gating
@@ -216,7 +234,7 @@ pub async fn handle_write_text_file(
     tracing::info!(path = %path, session_id = %session_id, content_len = content.len(), "Writing text file");
 
     // First, check sandboxing
-    let canonical_path = validate_and_resolve_path(path, true)?;
+    let canonical_path = validate_and_resolve_path(path, &shared.project_root, true)?;
     let canonical_path_str = canonical_path.to_string_lossy().to_string();
 
     // Create parent directories if they don't exist
@@ -229,7 +247,8 @@ pub async fn handle_write_text_file(
     // Check permission cache first
     let cached_decision = {
         let cache = shared.permission_cache.lock().await;
-        cache.get(&canonical_path_str).cloned()
+        let key = (session_id.to_string(), canonical_path_str.clone());
+        cache.get(&key).cloned()
     };
 
     match cached_decision {
@@ -310,7 +329,8 @@ pub async fn handle_write_text_file(
                     // Permission granted always, cache the decision and proceed with write
                     {
                         let mut cache = shared.permission_cache.lock().await;
-                        cache.insert(canonical_path_str, PermissionDecision::AllowAlways);
+                        let key = (session_id.to_string(), canonical_path_str.clone());
+                        cache.insert(key, PermissionDecision::AllowAlways);
                     }
                     fs::write(&canonical_path, content).map_err(|_| {
                         acp::Error::internal_error().with_data("failed to write file")
@@ -325,7 +345,8 @@ pub async fn handle_write_text_file(
                     // Permission denied always, cache the decision
                     {
                         let mut cache = shared.permission_cache.lock().await;
-                        cache.insert(canonical_path_str, PermissionDecision::RejectAlways);
+                        let key = (session_id.to_string(), canonical_path_str.clone());
+                        cache.insert(key, PermissionDecision::RejectAlways);
                     }
                     Err(acp::Error::new((-32000, "Permission denied".to_string())))
                 }

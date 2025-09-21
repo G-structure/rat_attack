@@ -9,5 +9,5 @@ pub mod server;
 
 pub use config::BridgeConfig;
 pub(crate) use config::BridgeSharedConfig;
-pub use handle::{BridgeHandle, BridgeError};
+pub use handle::{BridgeError, BridgeHandle};
 pub use server::serve;

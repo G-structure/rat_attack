@@ -1,11 +1,14 @@
 import { createSignal, createEffect, Show, For, onMount } from 'solid-js';
-import { createWebSocketClient } from './WebSocketClient';
+import { createWebSocketClient, type PermissionRequest } from './WebSocketClient';
+import { PermissionDialog, type PermissionDialogRequest } from './PermissionDialog';
+import { FileViewer, parseFileOperationFromToolCall, type FileOperation } from './FileViewer';
 
 interface Message {
   id: string;
-  type: 'user' | 'agent' | 'system';
+  type: 'user' | 'agent' | 'system' | 'file_operation';
   content: string;
   timestamp: Date;
+  fileOperation?: FileOperation;
 }
 
 interface Session {
@@ -19,6 +22,7 @@ export function ChatInterface() {
   const [isLoading, setIsLoading] = createSignal(false);
   const [messages, setMessages] = createSignal<Message[]>([]);
   const [isInitializing, setIsInitializing] = createSignal(false);
+  const [permissionRequest, setPermissionRequest] = createSignal<PermissionDialogRequest | null>(null);
 
   const wsClient = createWebSocketClient();
 
@@ -38,6 +42,20 @@ export function ChatInterface() {
           // Try different ways the notification might be structured
           let sessionId = params.sessionId || params.session_id;
           let textContent = null;
+
+          // Check for tool call updates (file operations, etc.)
+          if (params.toolCall || params.update?.toolCall) {
+            const toolCall = params.toolCall || params.update?.toolCall;
+            const fileOperation = parseFileOperationFromToolCall(toolCall);
+
+            if (fileOperation && sessionId === currentSession()?.id) {
+              addMessage('file_operation',
+                `${fileOperation.type === 'read' ? 'Reading' : 'Writing'} file: ${fileOperation.path}`,
+                fileOperation
+              );
+              return; // Don't process as regular text message
+            }
+          }
 
           // Look for text content in various possible structures
           if (params.update && params.update.content && params.update.content.text) {
@@ -66,6 +84,15 @@ export function ChatInterface() {
           }
         }
       }
+    });
+
+    // Set up permission request handler
+    wsClient.setPermissionRequestHandler((request: PermissionRequest, requestId: string | number) => {
+      console.log('Received permission request:', request);
+      setPermissionRequest({
+        requestId,
+        request
+      });
     });
   });
 
@@ -100,12 +127,13 @@ export function ChatInterface() {
     }
   };
 
-  const addMessage = (type: 'user' | 'agent' | 'system', content: string) => {
+  const addMessage = (type: 'user' | 'agent' | 'system' | 'file_operation', content: string, fileOperation?: FileOperation) => {
     const message: Message = {
       id: crypto.randomUUID(),
       type,
       content,
-      timestamp: new Date()
+      timestamp: new Date(),
+      fileOperation
     };
     setMessages(prev => [...prev, message]);
   };
@@ -132,6 +160,43 @@ export function ChatInterface() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
+    }
+  };
+
+  const handlePermissionResponse = async (optionId: string) => {
+    const currentRequest = permissionRequest();
+    if (!currentRequest) return;
+
+    try {
+      await wsClient.sendPermissionResponse(currentRequest.requestId, {
+        outcome: {
+          outcome: 'selected',
+          optionId
+        }
+      });
+      addMessage('system', `Permission granted: ${optionId}`);
+    } catch (error) {
+      addMessage('system', `Error responding to permission request: ${error}`);
+    } finally {
+      setPermissionRequest(null);
+    }
+  };
+
+  const handlePermissionCancel = async () => {
+    const currentRequest = permissionRequest();
+    if (!currentRequest) return;
+
+    try {
+      await wsClient.sendPermissionResponse(currentRequest.requestId, {
+        outcome: {
+          outcome: 'cancelled'
+        }
+      });
+      addMessage('system', 'Permission request cancelled');
+    } catch (error) {
+      addMessage('system', `Error cancelling permission request: ${error}`);
+    } finally {
+      setPermissionRequest(null);
     }
   };
 
@@ -178,22 +243,32 @@ export function ChatInterface() {
           {(message) => (
             <div class={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div
-                class={`max-w-xs md:max-w-md lg:max-w-lg px-4 py-2 rounded-lg ${
+                class={`max-w-xs md:max-w-md lg:max-w-lg ${
+                  message.type === 'file_operation' ? 'w-full max-w-full' : 'px-4 py-2 rounded-lg'
+                } ${
                   message.type === 'user'
-                    ? 'bg-blue-600 text-white'
+                    ? 'bg-blue-600 text-white px-4 py-2 rounded-lg'
                     : message.type === 'agent'
-                    ? 'bg-white border border-gray-200 text-gray-900'
-                    : 'bg-gray-100 text-gray-600 text-sm'
+                    ? 'bg-white border border-gray-200 text-gray-900 px-4 py-2 rounded-lg'
+                    : message.type === 'file_operation'
+                    ? ''
+                    : 'bg-gray-100 text-gray-600 text-sm px-4 py-2 rounded-lg'
                 }`}
               >
-                <div class="whitespace-pre-wrap">{message.content}</div>
-                <div
-                  class={`text-xs mt-1 ${
-                    message.type === 'user' ? 'text-blue-100' : 'text-gray-400'
-                  }`}
-                >
-                  {message.timestamp.toLocaleTimeString()}
-                </div>
+                <Show when={message.type === 'file_operation' && message.fileOperation}>
+                  <FileViewer operation={message.fileOperation!} />
+                </Show>
+
+                <Show when={message.type !== 'file_operation'}>
+                  <div class="whitespace-pre-wrap">{message.content}</div>
+                  <div
+                    class={`text-xs mt-1 ${
+                      message.type === 'user' ? 'text-blue-100' : 'text-gray-400'
+                    }`}
+                  >
+                    {message.timestamp.toLocaleTimeString()}
+                  </div>
+                </Show>
               </div>
             </div>
           )}
@@ -236,6 +311,13 @@ export function ChatInterface() {
           </button>
         </div>
       </div>
+
+      {/* Permission Dialog */}
+      <PermissionDialog
+        request={permissionRequest()}
+        onResponse={handlePermissionResponse}
+        onCancel={handlePermissionCancel}
+      />
     </div>
   );
 }

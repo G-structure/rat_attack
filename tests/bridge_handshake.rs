@@ -569,8 +569,7 @@ async fn auth_cli_login_returns_immediately_before_process_completion() {
     // Response should be immediate (under 1 second), not wait for process completion
     assert!(
         response_time.as_secs() < 1,
-        "auth/cli_login should return immediately, took {:?}",
-        response_time
+        "auth/cli_login should return immediately, took {response_time:?}"
     );
 
     // Verify process was started
@@ -1621,6 +1620,7 @@ impl BridgeHarness {
             allowed_origins: vec![ALLOWED_ORIGIN.into()],
             expected_subprotocol: SUBPROTOCOL.into(),
             bridge_id: TEST_BRIDGE_ID.into(),
+            project_root: std::env::current_dir().unwrap(),
         };
 
         let handle = serve(config, agent.clone()).await.expect("bridge start");

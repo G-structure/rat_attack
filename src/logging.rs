@@ -8,14 +8,8 @@
 
 use std::env;
 use std::path::Path;
-use tracing_subscriber::{
-    fmt,
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-    EnvFilter,
-    Layer,
-};
 use tracing_appender::rolling::RollingFileAppender;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 /// Initialize logging based on environment variables
 ///
@@ -91,11 +85,7 @@ pub fn init_logging() -> Result<(), Box<dyn std::error::Error>> {
 #[macro_export]
 macro_rules! log_request {
     ($method:expr, $id:expr) => {
-        tracing::debug!(
-            method = $method,
-            request_id = $id,
-            "Processing request"
-        )
+        tracing::debug!(method = $method, request_id = $id, "Processing request")
     };
 }
 
@@ -109,11 +99,7 @@ macro_rules! log_response {
                 "Request completed successfully"
             )
         } else {
-            tracing::warn!(
-                method = $method,
-                request_id = $id,
-                "Request failed"
-            )
+            tracing::warn!(method = $method, request_id = $id, "Request failed")
         }
     };
 }

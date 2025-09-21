@@ -3,13 +3,13 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ct_bridge::{serve, BridgeConfig, BridgeError, init_logging};
+use ct_bridge::{init_logging, serve, BridgeConfig, BridgeError};
 
 #[tokio::main]
 async fn main() -> Result<(), BridgeError> {
     // Initialize logging first
     if let Err(e) = init_logging() {
-        eprintln!("Failed to initialize logging: {}", e);
+        eprintln!("Failed to initialize logging: {e}");
         std::process::exit(1);
     }
 
@@ -36,9 +36,10 @@ async fn main() -> Result<(), BridgeError> {
         ],
         expected_subprotocol: "acp.jsonrpc.v1".to_string(),
         bridge_id: "ct-bridge-mvp".to_string(),
+        project_root: project_root.clone(),
     };
 
-    let transport = create_agent_transport(&agent_type, project_root).await?;
+    let transport = create_agent_transport(agent_type, project_root).await?;
 
     let handle = serve(config, transport).await?;
     tracing::info!(addr = %handle.local_addr(), "Bridge server listening");

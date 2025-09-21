@@ -3,30 +3,28 @@
 //! This module provides a transport that spawns external agent processes
 //! and communicates with them over stdio using JSON-RPC.
 
-use std::{
-    future::Future,
-    path::PathBuf,
-    pin::Pin,
-    process::Stdio,
-    sync::Arc,
-};
+use agent_client_protocol as acp;
+use futures_util::FutureExt;
+use serde_json::{json, Value};
+use std::{future::Future, path::PathBuf, pin::Pin, process::Stdio, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
     sync::{mpsc, Mutex},
     task::JoinHandle,
 };
-use agent_client_protocol as acp;
-use serde_json::{json, Value};
-use futures_util::FutureExt;
 
 use crate::transport::{AgentTransport, AgentTransportError, NotificationSender};
 
 /// A transport that communicates with external agents over stdio
 pub struct StdioAgentTransport {
+    #[allow(dead_code)]
     command: String,
+    #[allow(dead_code)]
     args: Vec<String>,
+    #[allow(dead_code)]
     project_root: PathBuf,
+    #[allow(dead_code)]
     process: Arc<Mutex<Option<Child>>>,
     request_sender: Arc<Mutex<Option<mpsc::UnboundedSender<StdioRequest>>>>,
     notification_sender: Arc<Mutex<Option<Arc<dyn NotificationSender>>>>,
@@ -54,15 +52,19 @@ impl StdioAgentTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| AgentTransportError::ProcessSpawn(format!("Failed to spawn {}: {}", command, e)))?;
+            .map_err(|e| {
+                AgentTransportError::ProcessSpawn(format!("Failed to spawn {command}: {e}"))
+            })?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            AgentTransportError::ProcessSpawn("Failed to get stdin".to_string())
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| AgentTransportError::ProcessSpawn("Failed to get stdin".to_string()))?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            AgentTransportError::ProcessSpawn("Failed to get stdout".to_string())
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AgentTransportError::ProcessSpawn("Failed to get stdout".to_string()))?;
 
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<StdioRequest>();
         let notification_sender = Arc::new(Mutex::new(None::<Arc<dyn NotificationSender>>));
@@ -72,7 +74,10 @@ impl StdioAgentTransport {
         let task_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut writer = stdin;
-            let mut pending_requests: std::collections::HashMap<String, tokio::sync::oneshot::Sender<Result<Value, AgentTransportError>>> = std::collections::HashMap::new();
+            let mut pending_requests: std::collections::HashMap<
+                String,
+                tokio::sync::oneshot::Sender<Result<Value, AgentTransportError>>,
+            > = std::collections::HashMap::new();
             let mut request_id_counter = 0u64;
 
             loop {
@@ -90,7 +95,7 @@ impl StdioAgentTransport {
                         });
 
                         if let Ok(request_line) = serde_json::to_string(&json_request) {
-                            let request_line = format!("{}\n", request_line);
+                            let request_line = format!("{request_line}\n");
                             if writer.write_all(request_line.as_bytes()).await.is_ok() {
                                 pending_requests.insert(request_id, request.response_sender);
                             } else {
@@ -151,7 +156,12 @@ impl StdioAgentTransport {
         })
     }
 
-    async fn send_request(&self, method: &str, params: Value) -> Result<Value, AgentTransportError> {
+    #[allow(dead_code)]
+    async fn send_request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, AgentTransportError> {
         let sender = self.request_sender.lock().await;
         let sender = sender.as_ref().ok_or_else(|| {
             AgentTransportError::Communication("Transport not initialized".to_string())
@@ -178,7 +188,8 @@ impl AgentTransport for StdioAgentTransport {
     fn initialize(
         &self,
         request: acp::InitializeRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<acp::InitializeResponse, AgentTransportError>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<acp::InitializeResponse, AgentTransportError>> + Send>>
+    {
         let params = serde_json::to_value(request).unwrap_or(json!({}));
         let transport = self.request_sender.clone();
 
@@ -204,15 +215,19 @@ impl AgentTransport for StdioAgentTransport {
             })??;
 
             serde_json::from_value(result).map_err(|e| {
-                AgentTransportError::Communication(format!("Failed to parse initialize response: {}", e))
+                AgentTransportError::Communication(format!(
+                    "Failed to parse initialize response: {e}"
+                ))
             })
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn new_session(
         &self,
         request: acp::NewSessionRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<acp::NewSessionResponse, AgentTransportError>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<acp::NewSessionResponse, AgentTransportError>> + Send>>
+    {
         let params = serde_json::to_value(request).unwrap_or(json!({}));
         let transport = self.request_sender.clone();
 
@@ -238,16 +253,20 @@ impl AgentTransport for StdioAgentTransport {
             })??;
 
             serde_json::from_value(result).map_err(|e| {
-                AgentTransportError::Communication(format!("Failed to parse session response: {}", e))
+                AgentTransportError::Communication(format!(
+                    "Failed to parse session response: {e}"
+                ))
             })
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn prompt(
         &self,
         request: acp::PromptRequest,
         notification_sender: Arc<dyn NotificationSender>,
-    ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>>
+    {
         let params = serde_json::to_value(request).unwrap_or(json!({}));
         let transport = self.request_sender.clone();
         let notification_store = self.notification_sender.clone();
@@ -280,9 +299,12 @@ impl AgentTransport for StdioAgentTransport {
             })??;
 
             serde_json::from_value(result).map_err(|e| {
-                AgentTransportError::Communication(format!("Failed to parse prompt response: {}", e))
+                AgentTransportError::Communication(format!(
+                    "Failed to parse prompt response: {e}"
+                ))
             })
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn request_permission(
@@ -293,33 +315,28 @@ impl AgentTransport for StdioAgentTransport {
             dyn Future<Output = Result<acp::RequestPermissionResponse, AgentTransportError>> + Send,
         >,
     > {
+        let notification_sender = self.notification_sender.clone();
         let params = serde_json::to_value(request).unwrap_or(json!({}));
-        let transport = self.request_sender.clone();
 
         async move {
-            let sender = transport.lock().await;
-            let sender = sender.as_ref().ok_or_else(|| {
-                AgentTransportError::Communication("Transport not initialized".to_string())
+            // Instead of sending back to the agent via stdio, send to the WebSocket client
+            let ns_guard = notification_sender.lock().await;
+            let sender = ns_guard.as_ref().ok_or_else(|| {
+                AgentTransportError::Communication("No notification sender available".to_string())
             })?;
 
-            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let request = StdioRequest {
-                method: "session/request_permission".to_string(),
-                params,
-                response_sender: response_tx,
-            };
+            // Send the permission request to the WebSocket client
+            let result = sender
+                .send_request("session/request_permission", params)
+                .await?;
 
-            sender.send(request).map_err(|_| {
-                AgentTransportError::Communication("Failed to send request".to_string())
-            })?;
-
-            let result = response_rx.await.map_err(|_| {
-                AgentTransportError::Communication("Failed to receive response".to_string())
-            })??;
-
+            // Parse the response from the client
             serde_json::from_value(result).map_err(|e| {
-                AgentTransportError::Communication(format!("Failed to parse permission response: {}", e))
+                AgentTransportError::Communication(format!(
+                    "Failed to parse permission response: {e}"
+                ))
             })
-        }.boxed()
+        }
+        .boxed()
     }
 }

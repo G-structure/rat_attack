@@ -3,17 +3,17 @@
 //! This module defines the traits and types for communicating with ACP agents.
 //! It handles the abstraction between the bridge and actual agent implementations.
 
-use std::{pin::Pin, future::Future, sync::Arc};
 use agent_client_protocol as acp;
+use std::{future::Future, pin::Pin, sync::Arc};
 
+pub mod dummy;
 pub mod error;
 pub mod notification;
-pub mod dummy;
 pub mod stdio;
 
+pub use dummy::DummyAgentTransport;
 pub use error::AgentTransportError;
 pub use notification::{NotificationSender, WebSocketNotificationSender};
-pub use dummy::DummyAgentTransport;
 pub use stdio::StdioAgentTransport;
 
 /// Trait for agent transport implementations

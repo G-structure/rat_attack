@@ -8,12 +8,12 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response as HandshakeResponse};
+use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
 
-use crate::bridge::{BridgeConfig, BridgeSharedConfig, BridgeHandle, BridgeError};
-use crate::transport::AgentTransport;
+use crate::bridge::{BridgeConfig, BridgeError, BridgeHandle, BridgeSharedConfig};
 use crate::protocol::{validate_origin, validate_subprotocol};
+use crate::transport::AgentTransport;
 
 /// Starts a new bridge server with the given configuration and agent transport
 ///
@@ -40,6 +40,7 @@ pub fn serve(
             allowed_origins,
             expected_subprotocol,
             bridge_id,
+            project_root,
         } = config;
 
         tracing::info!(bind_addr = %bind_addr, bridge_id = %bridge_id, "Starting bridge server");
@@ -52,6 +53,7 @@ pub fn serve(
             allowed_origins,
             expected_subprotocol,
             bridge_id,
+            project_root,
         }));
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();

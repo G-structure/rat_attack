@@ -44,10 +44,10 @@ impl AgentTransportError {
                 acp::Error::internal_error().with_data("agent transport not implemented")
             }
             AgentTransportError::ProcessSpawn(message) => {
-                acp::Error::internal_error().with_data(format!("process spawn error: {}", message))
+                acp::Error::internal_error().with_data(format!("process spawn error: {message}"))
             }
             AgentTransportError::Communication(message) => {
-                acp::Error::internal_error().with_data(format!("communication error: {}", message))
+                acp::Error::internal_error().with_data(format!("communication error: {message}"))
             }
         }
     }

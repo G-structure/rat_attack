@@ -3,7 +3,9 @@
 //! This module provides validation functions for WebSocket upgrade requests,
 //! including origin checking and subprotocol validation as required by the RAT spec.
 
-use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response as HandshakeResponse};
+use tokio_tungstenite::tungstenite::handshake::server::{
+    ErrorResponse, Request, Response as HandshakeResponse,
+};
 use tokio_tungstenite::tungstenite::http::header::{HeaderValue, ORIGIN, SEC_WEBSOCKET_PROTOCOL};
 use tokio_tungstenite::tungstenite::http::{Response as HttpResponse, StatusCode};
 

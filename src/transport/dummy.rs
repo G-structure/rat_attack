@@ -3,8 +3,8 @@
 //! This module provides a simple dummy agent implementation that echoes back
 //! user messages and simulates basic ACP functionality for testing purposes.
 
-use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 use agent_client_protocol as acp;
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 use crate::transport::{AgentTransport, AgentTransportError, NotificationSender};
 
@@ -13,6 +13,7 @@ use crate::transport::{AgentTransport, AgentTransportError, NotificationSender};
 /// This transport provides mock responses for testing the bridge functionality
 /// without requiring an actual agent process.
 pub struct DummyAgentTransport {
+    #[allow(dead_code)]
     project_root: PathBuf,
 }
 
@@ -27,7 +28,8 @@ impl AgentTransport for DummyAgentTransport {
     fn initialize(
         &self,
         request: acp::InitializeRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<acp::InitializeResponse, AgentTransportError>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<acp::InitializeResponse, AgentTransportError>> + Send>>
+    {
         let _request = request; // Acknowledge the parameter
 
         Box::pin(async move {
@@ -48,12 +50,15 @@ impl AgentTransport for DummyAgentTransport {
     fn new_session(
         &self,
         request: acp::NewSessionRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<acp::NewSessionResponse, AgentTransportError>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<acp::NewSessionResponse, AgentTransportError>> + Send>>
+    {
         let _request = request; // Acknowledge the parameter
 
         Box::pin(async move {
             Ok(acp::NewSessionResponse {
-                session_id: acp::SessionId(format!("dummy-session-{}", chrono::Utc::now().timestamp()).into()),
+                session_id: acp::SessionId(
+                    format!("dummy-session-{}", chrono::Utc::now().timestamp()).into(),
+                ),
                 modes: None,
                 meta: None,
             })
@@ -64,7 +69,8 @@ impl AgentTransport for DummyAgentTransport {
         &self,
         request: acp::PromptRequest,
         _notification_sender: Arc<dyn NotificationSender>,
-    ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<acp::PromptResponse, AgentTransportError>> + Send>>
+    {
         let _request = request; // Acknowledge the parameter
 
         Box::pin(async move {

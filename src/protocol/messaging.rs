@@ -3,13 +3,13 @@
 //! This module provides utilities for sending and receiving JSON-RPC messages
 //! over WebSocket connections, implementing the ACP message format.
 
-use std::sync::Arc;
+use agent_client_protocol as acp;
+use futures_util::SinkExt;
 use serde_json::Value;
+use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_tungstenite::{tungstenite::protocol::Message, WebSocketStream};
-use tokio::net::TcpStream;
-use futures_util::SinkExt;
-use agent_client_protocol as acp;
 
 /// Sends a JSON-RPC result response over a WebSocket stream
 ///

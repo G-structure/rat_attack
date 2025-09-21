@@ -6,4 +6,4 @@
 
 pub mod cache;
 
-pub use cache::{PermissionDecision, PermissionCache};
+pub use cache::{PermissionCache, PermissionDecision};

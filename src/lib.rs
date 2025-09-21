@@ -40,23 +40,26 @@
 
 // Core modules
 pub mod bridge;
-pub mod transport;
-pub mod protocol;
 pub mod logging;
+pub mod protocol;
+pub mod transport;
 
 // Feature modules
-pub mod filesystem;
 pub mod auth;
+pub mod filesystem;
 pub mod permissions;
 
 // Re-exports for public API
-pub use bridge::{BridgeConfig, BridgeHandle, BridgeError, serve};
-pub use transport::{AgentTransport, AgentTransportError, NotificationSender, WebSocketNotificationSender, DummyAgentTransport, StdioAgentTransport};
-pub use permissions::{PermissionDecision, PermissionCache};
+pub use bridge::{serve, BridgeConfig, BridgeError, BridgeHandle};
 pub use logging::init_logging;
+pub use permissions::{PermissionCache, PermissionDecision};
+pub use transport::{
+    AgentTransport, AgentTransportError, DummyAgentTransport, NotificationSender,
+    StdioAgentTransport, WebSocketNotificationSender,
+};
 
 // Internal re-exports for backward compatibility during refactoring
 // These maintain the existing public interface while code is being modularized
-pub use protocol::request::handle_websocket_messages;
-pub use filesystem::{handle_read_text_file, handle_write_text_file, validate_and_resolve_path};
 pub use auth::handle_auth_cli_login;
+pub use filesystem::{handle_read_text_file, handle_write_text_file, validate_and_resolve_path};
+pub use protocol::request::handle_websocket_messages;

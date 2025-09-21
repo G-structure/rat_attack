@@ -4,10 +4,10 @@
 //! CT-BRIDGE instances. It includes both public configuration and internal
 //! shared state.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::permissions::PermissionCache;
+use crate::permissions::PermissionDecision;
 
 /// Configuration for a CT-BRIDGE instance
 ///
@@ -28,6 +28,8 @@ pub struct BridgeConfig {
     pub expected_subprotocol: String,
     /// Stable, opaque identifier for this bridge instance
     pub bridge_id: String,
+    /// Project root path for file operations sandboxing (RAT-LWS-REQ-044)
+    pub project_root: PathBuf,
 }
 
 /// Internal shared configuration for bridge operations
@@ -35,15 +37,17 @@ pub struct BridgeConfig {
 /// This struct contains configuration and state that is shared across
 /// all connections to a bridge instance. It includes security policies
 /// and permission caching.
-pub(crate) struct BridgeSharedConfig {
+pub struct BridgeSharedConfig {
     /// List of allowed Origin headers for WebSocket connections
     pub allowed_origins: Vec<String>,
     /// Expected WebSocket subprotocol token
     pub expected_subprotocol: String,
     /// Stable identifier for this bridge instance (exposed in initialize response)
     pub bridge_id: String,
+    /// Project root path for file operations sandboxing (RAT-LWS-REQ-044)
+    pub project_root: PathBuf,
     /// Cache for permission decisions to avoid repeated prompts
-    pub permission_cache: PermissionCache,
+    pub permission_cache: Arc<TokioMutex<HashMap<(String, String), PermissionDecision>>>,
 }
 
 impl BridgeSharedConfig {
@@ -53,7 +57,12 @@ impl BridgeSharedConfig {
             allowed_origins: config.allowed_origins,
             expected_subprotocol: config.expected_subprotocol,
             bridge_id: config.bridge_id,
+            project_root: config.project_root,
             permission_cache: Arc::new(TokioMutex::new(HashMap::new())),
         }
     }
 }
+
+/// Type alias for session-specific permission cache
+/// Keys are (session_id, path) tuples for isolation per RAT-LWS-REQ-300
+pub type PermissionCache = Arc<TokioMutex<HashMap<(String, String), PermissionDecision>>>;

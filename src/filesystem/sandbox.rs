@@ -4,8 +4,8 @@
 //! ensuring that all file access is restricted to allowed directories
 //! as required by RAT-LWS-REQ-044.
 
-use std::path::PathBuf;
 use agent_client_protocol as acp;
+use std::path::PathBuf;
 
 /// Validates and resolves a file path with sandboxing restrictions
 ///

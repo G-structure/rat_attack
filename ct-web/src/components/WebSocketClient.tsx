@@ -101,6 +101,35 @@ export interface SessionUpdateNotification {
   };
 }
 
+export interface PermissionOption {
+  id: string;
+  name: string;
+  kind: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
+}
+
+export interface PermissionRequest {
+  method: 'session/request_permission';
+  params: {
+    sessionId: string;
+    toolCall: {
+      id: string;
+      fields: {
+        kind?: string;
+        title?: string;
+        status?: string;
+      };
+    };
+    options: PermissionOption[];
+  };
+}
+
+export interface PermissionResponse {
+  outcome: {
+    outcome: 'selected' | 'cancelled';
+    optionId?: string;
+  };
+}
+
 export function createWebSocketClient() {
   const [ws, setWs] = createSignal<WebSocket | null>(null);
   const [connectionState, setConnectionState] = createSignal<ConnectionState>({
@@ -110,6 +139,7 @@ export function createWebSocketClient() {
   let requestId = 1;
   let connectUrl: string | null = null;
   let notificationHandler: ((notification: any) => void) | null = null;
+  let permissionRequestHandler: ((request: PermissionRequest, requestId: string | number) => void) | null = null;
   const pendingRequests = new Map<string | number, {
     resolve: (value: any) => void;
     reject: (error: any) => void;
@@ -165,8 +195,14 @@ export function createWebSocketClient() {
       try {
         const message = JSON.parse(event.data);
 
-        if (message.id !== undefined) {
-          // This is a response to a request
+        if (message.id !== undefined && message.method !== undefined) {
+          // This is a request from the server (e.g., permission request)
+          console.log('Received request from server:', message);
+          if (message.method === 'session/request_permission' && permissionRequestHandler) {
+            permissionRequestHandler(message, message.id);
+          }
+        } else if (message.id !== undefined) {
+          // This is a response to a request we sent
           const pending = pendingRequests.get(message.id);
           if (pending) {
             pendingRequests.delete(message.id);
@@ -294,6 +330,25 @@ export function createWebSocketClient() {
     notificationHandler = handler;
   };
 
+  const setPermissionRequestHandler = (handler: ((request: PermissionRequest, requestId: string | number) => void) | null) => {
+    permissionRequestHandler = handler;
+  };
+
+  const sendPermissionResponse = async (requestId: string | number, response: PermissionResponse): Promise<void> => {
+    const currentWs = ws();
+    if (!currentWs || currentWs.readyState !== WebSocket.OPEN) {
+      throw new Error('WebSocket not connected');
+    }
+
+    const responseMessage = {
+      jsonrpc: '2.0',
+      id: requestId,
+      result: response
+    };
+
+    currentWs.send(JSON.stringify(responseMessage));
+  };
+
   return {
     connectionState,
     connect,
@@ -302,6 +357,8 @@ export function createWebSocketClient() {
     newSession,
     prompt,
     sendRequest,
-    setNotificationHandler
+    setNotificationHandler,
+    setPermissionRequestHandler,
+    sendPermissionResponse
   };
 }

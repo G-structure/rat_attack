@@ -1,23 +1,13 @@
 import { Show } from 'solid-js';
+import type { PermissionRequest as WSPermissionRequest, PermissionOption } from './WebSocketClient';
 
-export interface PermissionRequest {
-  id: string;
-  sessionId: string;
-  toolCall: {
-    tool: string;
-    input: any;
-  };
-  options: PermissionOption[];
-}
-
-export interface PermissionOption {
-  id: string;
-  label: string;
-  kind: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
+export interface PermissionDialogRequest {
+  requestId: string | number;
+  request: WSPermissionRequest;
 }
 
 export interface PermissionDialogProps {
-  request: PermissionRequest | null;
+  request: PermissionDialogRequest | null;
   onResponse: (optionId: string) => void;
   onCancel: () => void;
 }
@@ -59,10 +49,10 @@ export function PermissionDialog(props: PermissionDialogProps) {
               </p>
               <div class="bg-gray-50 border border-gray-200 rounded-lg p-3">
                 <div class="font-medium text-gray-900">
-                  {props.request?.toolCall.tool}
+                  {props.request?.request.params.toolCall.fields.title || 'File operation'}
                 </div>
                 <div class="text-sm text-gray-600 mt-1">
-                  {JSON.stringify(props.request?.toolCall.input, null, 2)}
+                  Type: {props.request?.request.params.toolCall.fields.kind || 'unknown'}
                 </div>
               </div>
             </div>
@@ -73,13 +63,13 @@ export function PermissionDialog(props: PermissionDialogProps) {
 
             {/* Options */}
             <div class="space-y-2">
-              {props.request?.options.map((option) => (
+              {props.request?.request.params.options.map((option) => (
                 <button
                   key={option.id}
                   class={`w-full px-4 py-2 rounded-lg font-medium text-left transition-colors ${getOptionButtonClass(option.kind)}`}
                   onClick={() => handleOptionClick(option.id)}
                 >
-                  {option.label}
+                  {option.name}
                 </button>
               ))}
             </div>
