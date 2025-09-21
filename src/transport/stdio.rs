@@ -69,6 +69,7 @@ impl StdioAgentTransport {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<StdioRequest>();
         let notification_sender = Arc::new(Mutex::new(None::<Arc<dyn NotificationSender>>));
         let notification_sender_clone = notification_sender.clone();
+        let project_root_clone = project_root.clone();
 
         // Spawn task to handle stdio communication
         let task_handle = tokio::spawn(async move {
@@ -128,11 +129,150 @@ impl StdioAgentTransport {
                                             }
                                         }
                                     } else if let Some(method) = response.get("method").and_then(|m| m.as_str()) {
-                                        // This is a notification - forward it to the WebSocket client
-                                        if let Some(params) = response.get("params") {
-                                            let sender_guard = notification_sender.lock().await;
-                                            if let Some(ref sender) = *sender_guard {
-                                                let _ = sender.send_notification(method, params.clone()).await;
+                                        // Check if this is a file system method that should be handled by the bridge
+                                        match method {
+                                            "fs/write_text_file" => {
+                                                tracing::debug!("Handling fs/write_text_file request from agent");
+
+                                                // Parse the request parameters
+                                                if let Some(params) = response.get("params") {
+                                                    let path = params.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                                                    let content = params.get("content").and_then(|c| c.as_str()).unwrap_or("");
+
+                                                    // Simple file write relative to project root
+                                                    let file_path = if std::path::Path::new(path).is_absolute() {
+                                                        PathBuf::from(path)
+                                                    } else {
+                                                        project_root_clone.join(path)
+                                                    };
+
+                                                    // Write the file
+                                                    match std::fs::write(&file_path, content) {
+                                                        Ok(_) => {
+                                                            tracing::info!(path = %file_path.display(), "Successfully wrote file");
+
+                                                            // Send success response back to agent if it has an ID
+                                                            if let Some(id) = response.get("id") {
+                                                                let success_response = json!({
+                                                                    "jsonrpc": "2.0",
+                                                                    "id": id,
+                                                                    "result": {}
+                                                                });
+
+                                                                let response_line = format!("{}\n", success_response);
+                                                                let _ = writer.write_all(response_line.as_bytes()).await;
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::error!(path = %file_path.display(), error = %e, "Failed to write file");
+
+                                                            // Send error response back to agent if it has an ID
+                                                            if let Some(id) = response.get("id") {
+                                                                let error_response = json!({
+                                                                    "jsonrpc": "2.0",
+                                                                    "id": id,
+                                                                    "error": {
+                                                                        "code": -32000,
+                                                                        "message": format!("Failed to write file: {}", e)
+                                                                    }
+                                                                });
+
+                                                                let response_line = format!("{}\n", error_response);
+                                                                let _ = writer.write_all(response_line.as_bytes()).await;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            "fs/read_text_file" => {
+                                                tracing::debug!("Handling fs/read_text_file request from agent");
+
+                                                // Parse the request parameters
+                                                if let Some(params) = response.get("params") {
+                                                    let path = params.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                                                    let line = params.get("line").and_then(|l| l.as_u64());
+                                                    let limit = params.get("limit").and_then(|l| l.as_u64());
+
+                                                    // Simple file read relative to project root
+                                                    let file_path = if std::path::Path::new(path).is_absolute() {
+                                                        PathBuf::from(path)
+                                                    } else {
+                                                        project_root_clone.join(path)
+                                                    };
+
+                                                    // Read the file
+                                                    match std::fs::read_to_string(&file_path) {
+                                                        Ok(content) => {
+                                                            // Handle line/limit parameters if specified
+                                                            let final_content = if let Some(start_line) = line {
+                                                                let lines: Vec<&str> = content.lines().collect();
+                                                                let start_idx = (start_line.saturating_sub(1)) as usize;
+
+                                                                if start_idx >= lines.len() {
+                                                                    String::new()
+                                                                } else {
+                                                                    let end_idx = if let Some(limit_val) = limit {
+                                                                        std::cmp::min(start_idx + limit_val as usize, lines.len())
+                                                                    } else {
+                                                                        lines.len()
+                                                                    };
+
+                                                                    lines[start_idx..end_idx].join("\n")
+                                                                }
+                                                            } else if let Some(limit_val) = limit {
+                                                                // Just limit from the beginning if only limit is specified
+                                                                let lines: Vec<&str> = content.lines().collect();
+                                                                let end_idx = std::cmp::min(limit_val as usize, lines.len());
+                                                                lines[0..end_idx].join("\n")
+                                                            } else {
+                                                                content
+                                                            };
+
+                                                            tracing::info!(path = %file_path.display(), content_len = final_content.len(), "Successfully read file");
+
+                                                            // Send success response back to agent if it has an ID
+                                                            if let Some(id) = response.get("id") {
+                                                                let success_response = json!({
+                                                                    "jsonrpc": "2.0",
+                                                                    "id": id,
+                                                                    "result": {
+                                                                        "content": final_content
+                                                                    }
+                                                                });
+
+                                                                let response_line = format!("{}\n", success_response);
+                                                                let _ = writer.write_all(response_line.as_bytes()).await;
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::error!(path = %file_path.display(), error = %e, "Failed to read file");
+
+                                                            // Send error response back to agent if it has an ID
+                                                            if let Some(id) = response.get("id") {
+                                                                let error_response = json!({
+                                                                    "jsonrpc": "2.0",
+                                                                    "id": id,
+                                                                    "error": {
+                                                                        "code": -32000,
+                                                                        "message": format!("Failed to read file: {}", e)
+                                                                    }
+                                                                });
+
+                                                                let response_line = format!("{}\n", error_response);
+                                                                let _ = writer.write_all(response_line.as_bytes()).await;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                // This is a notification - forward it to the WebSocket client
+                                                if let Some(params) = response.get("params") {
+                                                    let sender_guard = notification_sender.lock().await;
+                                                    if let Some(ref sender) = *sender_guard {
+                                                        let _ = sender.send_notification(method, params.clone()).await;
+                                                    }
+                                                }
                                             }
                                         }
                                     }

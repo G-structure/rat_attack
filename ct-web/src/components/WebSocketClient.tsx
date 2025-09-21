@@ -28,6 +28,7 @@ export interface InitializeResponse {
   authMethods: any[];
   _meta?: {
     bridgeId?: string;
+    projectRoot?: string;
   };
 }
 
@@ -138,6 +139,7 @@ export function createWebSocketClient() {
 
   let requestId = 1;
   let connectUrl: string | null = null;
+  let projectRoot: string | null = null;
   let notificationHandler: ((notification: any) => void) | null = null;
   let permissionRequestHandler: ((request: PermissionRequest, requestId: string | number) => void) | null = null;
   const pendingRequests = new Map<string | number, {
@@ -288,7 +290,7 @@ export function createWebSocketClient() {
 
     const response = await sendRequest('initialize', request);
 
-    // Update connection state with bridge ID if available
+    // Update connection state with bridge ID and store project root if available
     if (response._meta?.bridgeId) {
       setConnectionState(prev => ({
         ...prev,
@@ -296,12 +298,17 @@ export function createWebSocketClient() {
       }));
     }
 
+    // Store project root for use in session creation
+    if (response._meta?.projectRoot) {
+      projectRoot = response._meta.projectRoot;
+    }
+
     return response;
   };
 
   const newSession = async (): Promise<NewSessionResponse> => {
     const request: NewSessionRequest = {
-      cwd: '/tmp', // Default working directory for demo
+      cwd: projectRoot || '/tmp', // Use project root from bridge, fallback to /tmp
       mcpServers: []
     };
     return await sendRequest('session/new', request);

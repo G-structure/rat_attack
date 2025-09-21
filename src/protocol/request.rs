@@ -253,7 +253,7 @@ async fn handle_initialize(
     let response = transport.initialize(request).await;
     match response {
         Ok(mut response) => {
-            ensure_bridge_meta(&mut response, &shared.bridge_id);
+            ensure_bridge_meta(&mut response, &shared.bridge_id, &shared.project_root);
             tracing::info!(bridge_id = %shared.bridge_id, "Bridge initialization successful");
             let result = serde_json::to_value(response).map_err(|err| {
                 tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(err))
@@ -500,12 +500,13 @@ async fn handle_auth_cli_login(
 ///
 /// This function implements RAT-LWS-REQ-300 by injecting the bridge ID
 /// into the response metadata.
-fn ensure_bridge_meta(response: &mut acp::InitializeResponse, bridge_id: &str) {
+fn ensure_bridge_meta(response: &mut acp::InitializeResponse, bridge_id: &str, project_root: &std::path::Path) {
     use serde_json::Map;
     let mut meta = match response.meta.take() {
         Some(Value::Object(map)) => map,
         _ => Map::new(),
     };
     meta.insert("bridgeId".to_string(), json!(bridge_id));
+    meta.insert("projectRoot".to_string(), json!(project_root.to_string_lossy()));
     response.meta = Some(Value::Object(meta));
 }
